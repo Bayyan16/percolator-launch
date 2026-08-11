@@ -217,12 +217,10 @@ alter table public.waitlist enable row level security;
 drop policy if exists "anon insert" on public.waitlist;
 drop policy if exists "deny select" on public.waitlist;
 
--- Anon can insert (server-side route validates the signature first).
-create policy "anon insert"
-  on public.waitlist
-  for insert
-  to anon
-  with check (true);
+-- GH#2503: intentionally no INSERT policy is granted to anon.
+-- With RLS enabled, anonymous INSERT is denied by default.
+-- Legitimate signup writes use the server-only service-role client, which
+-- bypasses RLS through Supabase's service-role credential.
 
 -- Anon cannot read individual rows. Intentionally no select policy →
 -- deny by default under RLS. Public access goes through the SECURITY

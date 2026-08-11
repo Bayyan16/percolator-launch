@@ -758,7 +758,10 @@ export async function POST(req: Request) {
   //     fresh random 8-char Crockford code; retry with a new one
   //   • waitlist_pubkey_key or waitlist_email_unique_idx — the same user
   //     re-submitting; idempotent, mark as duplicate and move on
-  const supabase = getWaitlistSupabase();
+  // GH#2503: writes must use the existing server-only service-role client.
+  // The publishable/anon client must not provide an independent table-write
+  // path around the authorization and anti-abuse controls enforced above.
+  const supabase = getWaitlistServiceSupabase();
   const baseRow: Record<string, unknown> = {
     twitter_handle,
     source,
