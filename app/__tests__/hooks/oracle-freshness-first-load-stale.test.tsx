@@ -81,17 +81,24 @@ afterEach(() => {
 });
 
 describe("GH#2583: v17 oracle freshness derives age from push slot", () => {
-  it("CHARACTERIZATION: first render currently reports an hour-dead feed as fresh", async () => {
-    const { result } = renderHook(() => useOracleFreshness());
+  it("CHARACTERIZATION: first render currently reports an hour-dead feed as fresh", () => {
+    // Keep the initial cluster-slot request pending so this test isolates
+    // synchronous first-render behavior. Async correction is covered by
+    // the invariant tests below.
+    mocks.getSlot.mockImplementationOnce(
+      () => new Promise<number>(() => {}),
+    );
+
+    const { result, unmount } = renderHook(() =>
+      useOracleFreshness(),
+    );
 
     expect(result.current.mode).toBe("keeper");
     expect(result.current.ready).toBe(true);
     expect(result.current.level).toBe("fresh");
     expect(result.current.elapsedSecs).toBe(0);
 
-    await act(async () => {
-      await Promise.resolve();
-    });
+    unmount();
   });
 
   it("INVARIANT: an hour-dead keeper feed must become stale and block trading", async () => {

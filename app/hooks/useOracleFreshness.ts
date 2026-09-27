@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useSlabState } from "@/components/providers/SlabProvider";
-import { useClusterSlot } from "@/hooks/useClusterSlot";
+import { useClusterSlotObservation } from "@/hooks/useClusterSlot";
 import { detectOracleMode, type OracleMode } from "@/lib/oraclePrice";
 
 // GH#1338: "unavailable" = oracle has never been cranked (no valid price exists on-chain).
@@ -132,7 +132,7 @@ export interface UseOracleFreshnessOptions {
 export function useOracleFreshness(options?: UseOracleFreshnessOptions): OracleFreshnessState {
   const trackSeconds = options?.trackSeconds ?? false;
   const { config, engine, wrapperConfigV17 } = useSlabState();
-  const clusterSlot = useClusterSlot();
+  const clusterSlotObservation = useClusterSlotObservation();
   const [elapsedSecs, setElapsedSecs] = useState(0);
   const [lastUpdateMs, setLastUpdateMs] = useState<number | null>(null);
   const prevPriceRef = useRef<bigint | null>(null);
@@ -216,11 +216,19 @@ export function useOracleFreshness(options?: UseOracleFreshnessOptions): OracleF
       // advances. The keeper bumps it every ~10s, well under the stale threshold,
       // so a live-but-flat market never falsely reads stale.
       if (pushSlot !== null && pushSlot > 0n) {
-        if (clusterSlot !== null && clusterSlot >= pushSlot) {
+        if (
+          clusterSlotObservation !== null &&
+          clusterSlotObservation.slot >= pushSlot
+        ) {
           // markEwmaLastSlot is an on-chain slot, not a timestamp.
-          // Derive the real age from the live cluster slot.
-          const slotDelta = clusterSlot - pushSlot;
-          const derived = Date.now() - Number(slotDelta) * SLOT_MS;
+          // Anchor the estimate to the wall-clock time when this cluster slot
+          // was actually observed. Unrelated slab rerenders must not rebase
+          // the keeper's estimated push timestamp.
+          const slotDelta =
+            clusterSlotObservation.slot - pushSlot;
+          const derived =
+            clusterSlotObservation.observedAtMs -
+            Number(slotDelta) * SLOT_MS;
 
           // Both slab updates and cluster-slot polling can rerun this effect.
           // Keep the timestamp stable when the newly derived value is
@@ -268,7 +276,7 @@ export function useOracleFreshness(options?: UseOracleFreshnessOptions): OracleF
       }
       prevPriceRef.current = currentPrice;
     }
-  }, [config, engine, wrapperConfigV17, clusterSlot]);
+  }, [config, engine, wrapperConfigV17, clusterSlotObservation]);
 
   // Tick every second to update elapsed time — subscribes to the single
   // shared ticker (see subscribeSharedTick above) instead of running its own
