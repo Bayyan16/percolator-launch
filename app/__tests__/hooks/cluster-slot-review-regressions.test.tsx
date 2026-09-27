@@ -42,7 +42,7 @@ import { useOracleFreshness } from "@/hooks/useOracleFreshness";
 import { isOracleStaleBlocking } from "@/lib/oracle-stale-gate";
 
 const CURRENT_SLOT = 400_000_000n;
-const OLD_SLOT = CURRENT_SLOT - 500n;
+const LATE_GENERATION_SLOT = CURRENT_SLOT + 500n;
 
 const NON_ZERO_AUTHORITY = new PublicKey(
   "Sysvar1111111111111111111111111111111111112",
@@ -130,7 +130,7 @@ describe("CodeRabbit follow-up regressions for GH#2583", () => {
 
     // The old generation now completes late. It must NOT overwrite B.
     await act(async () => {
-      resolveOldRequest(Number(OLD_SLOT));
+      resolveOldRequest(Number(LATE_GENERATION_SLOT));
       await Promise.resolve();
     });
 
