@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useSlabState } from "@/components/providers/SlabProvider";
+import { useClusterSlot } from "@/hooks/useClusterSlot";
 import { detectOracleMode, type OracleMode } from "@/lib/oraclePrice";
 
 // GH#1338: "unavailable" = oracle has never been cranked (no valid price exists on-chain).
@@ -36,6 +37,7 @@ export interface OracleFreshnessState {
  */
 const FRESH_THRESHOLD = 30;
 const AGING_THRESHOLD = 60;
+const SLOT_MS = 400;
 
 /**
  * BUG 20 fix: previously every `useOracleFreshness()` call created its OWN
@@ -130,6 +132,7 @@ export interface UseOracleFreshnessOptions {
 export function useOracleFreshness(options?: UseOracleFreshnessOptions): OracleFreshnessState {
   const trackSeconds = options?.trackSeconds ?? false;
   const { config, engine, wrapperConfigV17 } = useSlabState();
+  const clusterSlot = useClusterSlot();
   const [elapsedSecs, setElapsedSecs] = useState(0);
   const [lastUpdateMs, setLastUpdateMs] = useState<number | null>(null);
   const prevPriceRef = useRef<bigint | null>(null);
@@ -213,10 +216,30 @@ export function useOracleFreshness(options?: UseOracleFreshnessOptions): OracleF
       // advances. The keeper bumps it every ~10s, well under the stale threshold,
       // so a live-but-flat market never falsely reads stale.
       if (pushSlot !== null && pushSlot > 0n) {
-        if (prevSlotRef.current === null || pushSlot !== prevSlotRef.current) {
-          // First observation OR the keeper pushed again → treat as just-updated.
+        if (clusterSlot !== null && clusterSlot >= pushSlot) {
+          // markEwmaLastSlot is an on-chain slot, not a timestamp.
+          // Derive the real age from the live cluster slot.
+          const slotDelta = clusterSlot - pushSlot;
+          const derived = Date.now() - Number(slotDelta) * SLOT_MS;
+
+          // Both slab updates and cluster-slot polling can rerun this effect.
+          // Keep the timestamp stable when the newly derived value is
+          // effectively equivalent to the previous one.
+          setLastUpdateMs((prev) =>
+            prev !== null && Math.abs(prev - derived) < 1_000
+              ? prev
+              : derived,
+          );
+        } else if (
+          prevSlotRef.current === null ||
+          pushSlot !== prevSlotRef.current
+        ) {
+          // The live cluster slot is not known yet, or briefly trails the
+          // slab read. Preserve the previous optimistic behaviour until a
+          // successful slot poll can derive the real age.
           setLastUpdateMs(Date.now());
         }
+
         prevSlotRef.current = pushSlot;
         prevPriceRef.current = currentPrice;
         return;
@@ -245,7 +268,7 @@ export function useOracleFreshness(options?: UseOracleFreshnessOptions): OracleF
       }
       prevPriceRef.current = currentPrice;
     }
-  }, [config, engine, wrapperConfigV17]);
+  }, [config, engine, wrapperConfigV17, clusterSlot]);
 
   // Tick every second to update elapsed time — subscribes to the single
   // shared ticker (see subscribeSharedTick above) instead of running its own
