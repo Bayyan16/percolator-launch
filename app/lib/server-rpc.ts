@@ -43,6 +43,68 @@ function isBlockhashMiss(e: unknown): boolean {
   return m.includes("blockhashnotfound") || m.includes("blockhash not found");
 }
 
+
+/**
+ * Confirm an already-broadcast server transaction by polling its signature.
+ *
+ * Unlike blockheight-bound confirmTransaction(), this resolves the original
+ * signature independently of the blockhash lifetime. On a load-balanced RPC,
+ * a landed transaction can be slow to become visible to the node handling
+ * confirmation.
+ *
+ * This helper never re-sends the transaction.
+ */
+export async function confirmServerSignature(
+  connection: Connection,
+  sig: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<string> {
+  const timeoutMs = opts.timeoutMs ?? 45_000;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    await sleep(1500);
+    let status;
+    try {
+      status = (
+        await connection.getSignatureStatus(sig, {
+          searchTransactionHistory: true,
+        })
+      ).value;
+    } catch {
+      continue;
+    }
+
+    if (!status) continue;
+    if (status.err) {
+      throw new Error(`Transaction failed: ${JSON.stringify(status.err)}`);
+    }
+    if (
+      status.confirmationStatus === "confirmed" ||
+      status.confirmationStatus === "finalized"
+    ) {
+      return sig;
+    }
+  }
+
+  // Final re-check — the RPC can be slow to reflect a landed transaction.
+  const finalStatus = await connection
+    .getSignatureStatus(sig, { searchTransactionHistory: true })
+    .catch(() => ({ value: null as null }));
+
+  const status = finalStatus.value;
+  if (
+    status &&
+    !status.err &&
+    (status.confirmationStatus === "confirmed" ||
+      status.confirmationStatus === "finalized")
+  ) {
+    return sig;
+  }
+
+  throw new Error(`Transaction ${sig} not confirmed within ${timeoutMs}ms`);
+}
+
 /**
  * Robust server-side send+confirm for a legacy Transaction on a load-balanced
  * devnet RPC (the padre endpoint). Web3.js `sendAndConfirmTransaction` throws
@@ -89,26 +151,5 @@ export async function sendAndConfirmServerTx(
   }
   if (!sig) throw new Error("sendAndConfirmServerTx: transaction was never broadcast");
 
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    await sleep(1500);
-    let s;
-    try {
-      s = (await connection.getSignatureStatus(sig, { searchTransactionHistory: true })).value;
-    } catch {
-      continue;
-    }
-    if (!s) continue;
-    if (s.err) throw new Error(`Transaction failed: ${JSON.stringify(s.err)}`);
-    if (s.confirmationStatus === "confirmed" || s.confirmationStatus === "finalized") return sig;
-  }
-  // Final re-check — the padre RPC can be slow to reflect a landed tx.
-  const finalStatus = await connection
-    .getSignatureStatus(sig, { searchTransactionHistory: true })
-    .catch(() => ({ value: null as null }));
-  const fs = finalStatus.value;
-  if (fs && !fs.err && (fs.confirmationStatus === "confirmed" || fs.confirmationStatus === "finalized")) {
-    return sig;
-  }
-  throw new Error(`Transaction ${sig} not confirmed within ${timeoutMs}ms`);
+  return confirmServerSignature(connection, sig, { timeoutMs });
 }

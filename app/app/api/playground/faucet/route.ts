@@ -44,7 +44,7 @@ import {
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import { getDevnetMintSigner } from "@/lib/devnet-signer";
-import { getServerConnection } from "@/lib/server-rpc";
+import { confirmServerSignature, getServerConnection } from "@/lib/server-rpc";
 import * as Sentry from "@sentry/nextjs";
 import { assertSuccessfulConfirmation } from "@/lib/transaction-confirmation";
 
@@ -222,7 +222,9 @@ export async function POST(req: NextRequest) {
 
       tx.add(createMintToInstruction(usdcMint, ata, mintAuthPk, BigInt(USDC_MINT_AMOUNT)));
 
-      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+      // A finalized blockhash is already visible across the load-balanced RPC
+      // before this server-signed transaction is broadcast.
+      const { blockhash } = await connection.getLatestBlockhash("finalized");
       tx.recentBlockhash = blockhash;
       tx.feePayer = mintAuthPk; // playground sponsors this transaction's fee
 
@@ -231,16 +233,11 @@ export async function POST(req: NextRequest) {
         (signedTx as Transaction).serialize(),
         { skipPreflight: false },
       );
-      // GH#2517: the catch below releases the durable claim slot, so throwing
-      // here is what stops a failed mint from recording the claim and telling
-      // the caller 10,000 Sim-USDC was delivered.
-      assertSuccessfulConfirmation(
-        await connection.confirmTransaction(
-          { signature: usdcSig, blockhash, lastValidBlockHeight },
-          "confirmed",
-        ),
-        "Playground USDC faucet mint",
-      );
+
+      // Resolve the original signature after broadcast. Do not rebuild/re-mint
+      // merely because its blockhash lifetime elapsed: a slow RPC may still be
+      // catching up to a transaction that already landed.
+      await confirmServerSignature(connection, usdcSig, { timeoutMs: 45_000 });
     } catch (mintErr) {
       // Release the durable claim slot so a mint failure doesn't lock the wallet.
       if (supabase && gate.claimId) {
