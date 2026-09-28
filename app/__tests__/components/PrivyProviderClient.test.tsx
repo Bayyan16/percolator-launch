@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, waitFor } from "@testing-library/react";
+import { act, render, waitFor } from "@testing-library/react";
 import { useContext } from "react";
 import { Keypair } from "@solana/web3.js";
 import * as Sentry from "@sentry/nextjs";
@@ -47,6 +47,8 @@ vi.mock("@solana/web3.js", async (importOriginal) => {
 
 const mockUsePrivy = vi.fn();
 const mockUseWallets = vi.fn();
+const mockUseLogin = vi.fn();
+const mockLogin = vi.fn();
 // The variadic Privy signer (`useSignTransaction().signTransaction`) — this is
 // the ATTEMPT 3 fallback `signAllTransactions` reaches when the wallet has no
 // wallet-standard batch-signing feature. It still resolves with N signed
@@ -65,6 +67,10 @@ vi.mock("@privy-io/react-auth", () => ({
     </div>
   ),
   usePrivy: () => mockUsePrivy(),
+  useLogin: (callbacks: any) => {
+    mockUseLogin(callbacks);
+    return { login: mockLogin };
+  },
 }));
 
 vi.mock("@privy-io/react-auth/solana", () => ({
@@ -80,6 +86,7 @@ vi.mock("@privy-io/react-auth/solana", () => ({
 
 import PrivyProviderClient from "@/components/providers/PrivyProviderClient";
 import { WalletApiContext, type WalletApi } from "@/hooks/walletApiContext";
+import { PreferredWalletContext } from "@/hooks/usePreferredWallet";
 
 /** Reads the WalletApi injected by PrivyProviderClient's inner bridge and
  *  reports it back to the test via a plain callback (no state needed —
@@ -113,6 +120,46 @@ describe("PrivyProviderClient", () => {
     expect(wrapper?.getAttribute("data-walletconnect")).toBe("walletconnect-test");
     expect(wrapper?.getAttribute("data-walletlist")).toContain("phantom");
     expect(wrapper?.getAttribute("data-walletlist")).toContain("solflare");
+  });
+
+  it("binds the Solana account actually used by the central Privy login bridge", () => {
+    const setPreferredAddress = vi.fn();
+
+    render(
+      <PreferredWalletContext.Provider
+        value={{
+          preferredAddress: "PHANTOM_OLD_ADDRESS",
+          setPreferredAddress,
+        }}
+      >
+        <PrivyProviderClient appId="test">
+          child
+        </PrivyProviderClient>
+      </PreferredWalletContext.Provider>,
+    );
+
+    const callbacks = mockUseLogin.mock.calls[0]?.[0];
+    expect(callbacks?.onComplete).toBeTypeOf("function");
+
+    act(() => {
+      callbacks.onComplete({
+        user: {},
+        isNewUser: false,
+        wasAlreadyAuthenticated: false,
+        loginMethod: "wallet",
+        loginAccount: {
+          type: "wallet",
+          address: "SOLFLARE_BRIDGE_LOGIN_ADDRESS",
+          chainType: "solana",
+          walletClientType: "solflare",
+        },
+      });
+    });
+
+    expect(setPreferredAddress).toHaveBeenCalledTimes(1);
+    expect(setPreferredAddress).toHaveBeenCalledWith(
+      "SOLFLARE_BRIDGE_LOGIN_ADDRESS",
+    );
   });
 
   describe("signAllTransactions diagnosability (GH#2594)", () => {

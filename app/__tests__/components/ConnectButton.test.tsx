@@ -46,6 +46,9 @@ let privyState = {
 };
 
 vi.mock("@privy-io/react-auth", () => ({
+  useLogin: () => ({
+    login: mockLogin,
+  }),
   usePrivy: () => privyState,
 }));
 

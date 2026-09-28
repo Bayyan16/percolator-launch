@@ -1,7 +1,7 @@
 "use client";
 
 import { FC, ReactNode, useMemo } from "react";
-import { PrivyProvider, usePrivy, type WalletListEntry } from "@privy-io/react-auth";
+import { PrivyProvider, useLogin, usePrivy, type WalletListEntry } from "@privy-io/react-auth";
 import {
   toSolanaWalletConnectors,
   useWallets,
@@ -320,7 +320,18 @@ const PrivyWalletApiBridge: FC<{ children: ReactNode }> = ({ children }) => {
  * outside the Privy tree can trigger wallet connection safely.
  */
 const PrivyLoginBridge: FC<{ children: ReactNode }> = ({ children }) => {
-  const { login } = usePrivy();
+  const { setPreferredAddress } = usePreferredWallet();
+
+  const { login } = useLogin({
+    onComplete: ({ loginAccount }) => {
+      // This bridge backs Trade/Faucet and other callers of usePrivyLogin().
+      // Persist the wallet that actually authenticated the session.
+      if (loginAccount?.type === "wallet" && loginAccount.chainType === "solana") {
+        setPreferredAddress(loginAccount.address);
+      }
+    },
+  });
+
   return (
     <PrivyLoginContext.Provider value={login}>
       {children}

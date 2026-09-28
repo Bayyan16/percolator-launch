@@ -2,14 +2,14 @@
 
 import Link from "next/link";
 import { Suspense, useEffect, useMemo, useCallback } from "react";
-import { usePrivy, type LinkedAccountWithMetadata } from "@privy-io/react-auth";
+import { useConnectWallet, usePrivy, type LinkedAccountWithMetadata } from "@privy-io/react-auth";
 import { useFundWallet, useWallets } from "@privy-io/react-auth/solana";
 import { ScrollReveal } from "@/components/ui/ScrollReveal";
 import { GlassCard } from "@/components/ui/GlassCard";
 import { GlowButton } from "@/components/ui/GlowButton";
 import { CopyableAddress } from "@/components/ui/CopyableAddress";
 import { InfoBanner } from "@/components/ui/InfoBanner";
-import { usePrivyAvailable } from "@/hooks/usePrivySafe";
+import { usePrivyAvailable, usePrivyLogin } from "@/hooks/usePrivySafe";
 import {
   usePreferredWallet,
   resolveActiveWallet,
@@ -52,10 +52,18 @@ export default function WalletPage() {
 }
 
 function WalletPageInner() {
-  const { ready, authenticated, login, logout, connectWallet, exportWallet, user } = usePrivy();
+  const { ready, authenticated, logout, exportWallet, user } = usePrivy();
   const { wallets } = useWallets();
   const { fundWallet } = useFundWallet();
   const { preferredAddress, setPreferredAddress } = usePreferredWallet();
+  const privyLogin = usePrivyLogin();
+
+  const { connectWallet } = useConnectWallet({
+    onSuccess: ({ wallet }) => {
+      // A wallet explicitly added by the user becomes the active signer.
+      setPreferredAddress(wallet.address);
+    },
+  });
 
   const network = useMemo(() => getConfig().network, []);
 
@@ -74,9 +82,9 @@ function WalletPageInner() {
     if (connectWallet) {
       connectWallet({ walletChainType: "solana-only" });
     } else {
-      login();
+      privyLogin();
     }
-  }, [connectWallet, login]);
+  }, [connectWallet, privyLogin]);
 
   if (!ready) {
     return (
@@ -164,7 +172,14 @@ function WalletPageInner() {
               >
                 Export key
               </GlowButton>
-              <GlowButton onClick={() => logout()} variant="ghost" size="sm">
+              <GlowButton
+                onClick={() => {
+                  setPreferredAddress(null);
+                  logout();
+                }}
+                variant="ghost"
+                size="sm"
+              >
                 Disconnect
               </GlowButton>
             </div>

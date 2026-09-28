@@ -3,7 +3,7 @@
 import { FC, useCallback, useMemo, useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { usePrivy, type LinkedAccountWithMetadata } from "@privy-io/react-auth";
+import { useLogin, usePrivy, type LinkedAccountWithMetadata } from "@privy-io/react-auth";
 import { useFundWallet, useWallets } from "@privy-io/react-auth/solana";
 import { getConfig } from "@/lib/config";
 import { usePreferredWallet, resolveActiveWallet } from "@/hooks/usePreferredWallet";
@@ -18,10 +18,10 @@ import { buildSolflareBrowseUrl } from "@/lib/solflare";
  * Ported verbatim from the former inline `ConnectButtonPrivyInner`.
  */
 export const ConnectButtonPrivyInner: FC = () => {
-  const { ready, authenticated, login, logout, exportWallet, user } = usePrivy();
+  const { ready, authenticated, logout, exportWallet, user } = usePrivy();
   const { wallets } = useWallets();
   const { fundWallet } = useFundWallet();
-  const { preferredAddress } = usePreferredWallet();
+  const { preferredAddress, setPreferredAddress } = usePreferredWallet();
   const searchParams = useSearchParams();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -29,6 +29,17 @@ export const ConnectButtonPrivyInner: FC = () => {
   const activeWallet = useMemo(() => {
     return resolveActiveWallet(wallets, preferredAddress);
   }, [wallets, preferredAddress]);
+
+  const { login } = useLogin({
+    onComplete: ({ loginAccount }) => {
+      // `loginAccount` is the account actually used for this login flow.
+      // Bind that wallet explicitly instead of relying on linked-wallet order
+      // or `user.wallet`, which may still point at a previously-linked wallet.
+      if (loginAccount?.type === "wallet" && loginAccount.chainType === "solana") {
+        setPreferredAddress(loginAccount.address);
+      }
+    },
+  });
 
   const displayAddress = useMemo(() => {
     // activeWallet can be transiently null right after Privy authenticates (the
@@ -164,6 +175,7 @@ export const ConnectButtonPrivyInner: FC = () => {
           </button>
           <button
             onClick={() => {
+              setPreferredAddress(null);
               logout();
               setMenuOpen(false);
             }}
