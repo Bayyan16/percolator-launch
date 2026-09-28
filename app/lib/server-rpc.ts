@@ -45,6 +45,70 @@ function isBlockhashMiss(e: unknown): boolean {
 
 
 /**
+ * Raised when an already-broadcast transaction is known to have failed
+ * on-chain. This is a definite failure: callers may safely release any claim
+ * reservation associated with the transaction.
+ */
+export class ServerSignatureExecutionError extends Error {
+  readonly signature: string;
+  readonly transactionError: unknown;
+
+  constructor(signature: string, transactionError: unknown) {
+    super(`Transaction failed: ${JSON.stringify(transactionError)}`);
+    this.name = "ServerSignatureExecutionError";
+    this.signature = signature;
+    this.transactionError = transactionError;
+  }
+}
+
+/**
+ * Raised when an already-broadcast transaction still has no definitive status
+ * after bounded polling plus the final history-aware re-check.
+ *
+ * This is an UNKNOWN outcome, not proof that the transaction failed. Callers
+ * must not release a mint/claim reservation in response to this error.
+ */
+export class ServerSignatureTimeoutError extends Error {
+  readonly signature: string;
+  readonly timeoutMs: number;
+
+  constructor(signature: string, timeoutMs: number) {
+    super(`Transaction ${signature} not confirmed within ${timeoutMs}ms`);
+    this.name = "ServerSignatureTimeoutError";
+    this.signature = signature;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+const STATUS_REQUEST_TIMEOUT_MS = 5_000;
+const FINAL_STATUS_TIMEOUT_MS = 2_000;
+
+/**
+ * Bound a single signature-status RPC request. Solana web3.js does not provide
+ * a request timeout for getSignatureStatus(), so a stalled upstream must not
+ * be allowed to hold the route open indefinitely.
+ */
+async function getSignatureStatusWithTimeout(
+  connection: Connection,
+  sig: string,
+  timeoutMs: number,
+) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      connection.getSignatureStatus(sig, {
+        searchTransactionHistory: true,
+      }),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
  * Confirm an already-broadcast server transaction by polling its signature.
  *
  * Unlike blockheight-bound confirmTransaction(), this resolves the original
@@ -64,20 +128,26 @@ export async function confirmServerSignature(
 
   while (Date.now() < deadline) {
     await sleep(1500);
+
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+
     let status;
     try {
-      status = (
-        await connection.getSignatureStatus(sig, {
-          searchTransactionHistory: true,
-        })
-      ).value;
+      const response = await getSignatureStatusWithTimeout(
+        connection,
+        sig,
+        Math.min(STATUS_REQUEST_TIMEOUT_MS, remainingMs),
+      );
+      if (!response) continue;
+      status = response.value;
     } catch {
       continue;
     }
 
     if (!status) continue;
     if (status.err) {
-      throw new Error(`Transaction failed: ${JSON.stringify(status.err)}`);
+      throw new ServerSignatureExecutionError(sig, status.err);
     }
     if (
       status.confirmationStatus === "confirmed" ||
@@ -87,22 +157,29 @@ export async function confirmServerSignature(
     }
   }
 
-  // Final re-check — the RPC can be slow to reflect a landed transaction.
-  const finalStatus = await connection
-    .getSignatureStatus(sig, { searchTransactionHistory: true })
-    .catch(() => ({ value: null as null }));
+  // Final history-aware re-check. It has its own short timeout so the check
+  // cannot leave the route pending indefinitely after the main deadline.
+  const finalStatus = await getSignatureStatusWithTimeout(
+    connection,
+    sig,
+    FINAL_STATUS_TIMEOUT_MS,
+  ).catch(() => null);
 
-  const status = finalStatus.value;
+  const status = finalStatus?.value ?? null;
+
+  if (status?.err) {
+    throw new ServerSignatureExecutionError(sig, status.err);
+  }
+
   if (
     status &&
-    !status.err &&
     (status.confirmationStatus === "confirmed" ||
       status.confirmationStatus === "finalized")
   ) {
     return sig;
   }
 
-  throw new Error(`Transaction ${sig} not confirmed within ${timeoutMs}ms`);
+  throw new ServerSignatureTimeoutError(sig, timeoutMs);
 }
 
 /**

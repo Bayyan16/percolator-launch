@@ -15,10 +15,10 @@ function read(file: string): string {
 
 function usdcMintSection(src: string): string {
   const start = src.indexOf('// ── Mint Sim-USDC');
-  const end = src.indexOf('// Record claim AFTER on-chain success');
+  const end = src.indexOf('// ── Small SOL airdrop');
 
   expect(start, 'USDC mint section marker moved or disappeared').toBeGreaterThanOrEqual(0);
-  expect(end, 'claim marker moved or disappeared').toBeGreaterThan(start);
+  expect(end, 'SOL airdrop marker moved or disappeared').toBeGreaterThan(start);
 
   return src.slice(start, end);
 }
@@ -29,7 +29,7 @@ describe('GH#2598: playground faucet blockheight-expiry regression', () => {
     const section = usdcMintSection(route);
 
     expect(route).toMatch(
-      /import\s*\{\s*confirmServerSignature\s*,\s*getServerConnection\s*\}\s*from\s*['"]@\/lib\/server-rpc['"]/,
+      /confirmServerSignature[\s\S]*getServerConnection[\s\S]*ServerSignatureExecutionError[\s\S]*ServerSignatureTimeoutError[\s\S]*from\s*['"]@\/lib\/server-rpc['"]/,
     );
     expect(section).toMatch(/getLatestBlockhash\(\s*['"]finalized['"]\s*\)/);
     expect(section).not.toMatch(/getLatestBlockhash\(\s*['"]confirmed['"]\s*\)/);
@@ -48,27 +48,67 @@ describe('GH#2598: playground faucet blockheight-expiry regression', () => {
     expect(section).not.toMatch(/maxRetries\s*:/);
   });
 
-  it('the shared helper polls the original signature, never broadcasts, and the existing server sender delegates to it', () => {
+  it('releases a claim only for pre-broadcast or explicitly established execution failure', () => {
+    const section = usdcMintSection(read(ROUTE));
+
+    expect(section).toContain(
+      'const wasBroadcast = typeof usdcSig === "string" && usdcSig.length > 0',
+    );
+    expect(section).toContain(
+      'mintErr instanceof ServerSignatureExecutionError',
+    );
+    expect(section).toContain(
+      'const unresolved = wasBroadcast && !definiteFailure',
+    );
+    expect(section).toContain('recordClaim(walletAddress)');
+    expect(section).toContain('pending: true');
+    expect(section).toContain('retryable: false');
+    expect(section).toContain('usdc_sig: usdcSig');
+
+    expect(section).toMatch(
+      /if\s*\(unresolved\)[\s\S]*recordClaim\(walletAddress\)[\s\S]*else if\s*\(supabase && gate\.claimId\)[\s\S]*releaseFaucetClaim/,
+    );
+  });
+
+  it('the shared helper bounds status RPCs, reports final on-chain errors, never broadcasts, and the existing server sender delegates to it', () => {
     const helper = read(SERVER_RPC);
 
-    const start = helper.indexOf('export async function confirmServerSignature(');
-    const end = helper.indexOf('export async function sendAndConfirmServerTx(');
-
-    expect(start, 'confirmServerSignature() missing').toBeGreaterThanOrEqual(0);
+    const statusHelperStart = helper.indexOf(
+      'async function getSignatureStatusWithTimeout(',
+    );
+    const confirmStart = helper.indexOf(
+      'export async function confirmServerSignature(',
+    );
+    const senderStart = helper.indexOf(
+      'export async function sendAndConfirmServerTx(',
+    );
 
     expect(
-      end,
+      statusHelperStart,
+      'getSignatureStatusWithTimeout() missing',
+    ).toBeGreaterThanOrEqual(0);
+    expect(confirmStart, 'confirmServerSignature() missing').toBeGreaterThan(
+      statusHelperStart,
+    );
+    expect(
+      senderStart,
       'sendAndConfirmServerTx() missing or appears before confirmServerSignature()',
-    ).toBeGreaterThan(start);
+    ).toBeGreaterThan(confirmStart);
 
-    const section = helper.slice(start, end);
+    const confirmationSection = helper.slice(statusHelperStart, senderStart);
 
-    expect(section).toContain('getSignatureStatus(');
-    expect(section).toContain('searchTransactionHistory: true');
-    expect(section).toMatch(/confirmationStatus\s*===\s*['"]confirmed['"]/);
-    expect(section).toMatch(/confirmationStatus\s*===\s*['"]finalized['"]/);
-    expect(section).not.toContain('sendRawTransaction(');
+    expect(confirmationSection).toContain('getSignatureStatus(');
+    expect(confirmationSection).toContain('searchTransactionHistory: true');
+    expect(confirmationSection).toContain('Promise.race([');
+    expect(helper).toContain('STATUS_REQUEST_TIMEOUT_MS = 5_000');
+    expect(helper).toContain('FINAL_STATUS_TIMEOUT_MS = 2_000');
+    expect(confirmationSection).toContain('status?.err');
+    expect(confirmationSection).toContain('ServerSignatureExecutionError');
+    expect(confirmationSection).toContain('ServerSignatureTimeoutError');
+    expect(confirmationSection).not.toContain('sendRawTransaction(');
 
-    expect(helper).toContain('return confirmServerSignature(connection, sig, { timeoutMs });');
+    expect(helper).toContain(
+      'return confirmServerSignature(connection, sig, { timeoutMs });',
+    );
   });
 });

@@ -24,7 +24,11 @@
  *                   sol_airdropped: boolean, sol_sig?: string, nextClaimAt: string }
  * Response (400): { error: string }
  * Response (429): { error: string, nextClaimAt: string }
- * Response (503): { error: string, retryable: true }
+
+ * Response (503, definite failure): { error: string, retryable: true }
+ * Response (503, broadcast outcome unresolved):
+ *   { error: string, detail: string, pending: true, retryable: false,
+ *     usdc_sig: string, nextClaimAt: string }
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -44,7 +48,12 @@ import {
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import { getDevnetMintSigner } from "@/lib/devnet-signer";
-import { confirmServerSignature, getServerConnection } from "@/lib/server-rpc";
+import {
+  confirmServerSignature,
+  getServerConnection,
+  ServerSignatureExecutionError,
+  ServerSignatureTimeoutError,
+} from "@/lib/server-rpc";
 import * as Sentry from "@sentry/nextjs";
 import { assertSuccessfulConfirmation } from "@/lib/transaction-confirmation";
 
@@ -74,7 +83,7 @@ const NETWORK =
   process.env.NEXT_PUBLIC_SOLANA_NETWORK;
 
 // ── In-memory rate-limit store ────────────────────────────────────────────────
-// Maps wallet address → timestamp of last successful claim.
+// Maps wallet address → timestamp of the last retained claim/reservation.
 // Process-local; resets on cold start — acceptable for devnet playground.
 const claimStore = new Map<string, number>();
 
@@ -195,7 +204,7 @@ export async function POST(req: NextRequest) {
     const connection = getServerConnection("confirmed");
 
     // ── Mint Sim-USDC ───────────────────────────────────────────────────────
-    let usdcSig: string;
+    let usdcSig: string | undefined;
     try {
       const ata = await getAssociatedTokenAddress(usdcMint, walletPk);
       const tx = new Transaction();
@@ -239,22 +248,72 @@ export async function POST(req: NextRequest) {
       // catching up to a transaction that already landed.
       await confirmServerSignature(connection, usdcSig, { timeoutMs: 45_000 });
     } catch (mintErr) {
-      // Release the durable claim slot so a mint failure doesn't lock the wallet.
-      if (supabase && gate.claimId) {
-        try { const { releaseFaucetClaim } = await import("@/lib/faucet-rate-gate"); await releaseFaucetClaim(supabase, gate.claimId); } catch { /* best-effort */ }
+      const wasBroadcast = typeof usdcSig === "string" && usdcSig.length > 0;
+      const definiteFailure = mintErr instanceof ServerSignatureExecutionError;
+
+      // Once a signature exists, release the claim ONLY when on-chain failure
+      // is explicitly established. Timeout, RPC/library errors, and any other
+      // unexpected post-broadcast exception remain UNKNOWN/fail-closed.
+      const unresolved = wasBroadcast && !definiteFailure;
+
+      // A confirmation timeout after sendRawTransaction returned a signature is
+      // an UNKNOWN outcome, not a proven mint failure. Keep the durable claim
+      // reservation in place so a retry cannot broadcast a second mint while
+      // the original transaction may already have landed. Also record the
+      // process-local fallback claim for Supabase-unavailable deployments.
+      //
+      // Pre-broadcast failures and explicit on-chain execution failures are
+      // definite enough to release the durable claim and become retryable.
+      // Any other post-broadcast error keeps the reservation fail-closed.
+      let pendingNextClaimAt: string | undefined;
+      if (unresolved) {
+        pendingNextClaimAt = recordClaim(walletAddress);
+      } else if (supabase && gate.claimId) {
+        try {
+          const { releaseFaucetClaim } = await import("@/lib/faucet-rate-gate");
+          await releaseFaucetClaim(supabase, gate.claimId);
+        } catch {
+          /* best-effort */
+        }
       }
+
       Sentry.captureException(mintErr, {
         tags: { endpoint: "/api/playground/faucet", step: "mint_usdc" },
-        extra: { walletAddress },
+        extra: {
+          walletAddress,
+          ...(unresolved ? { usdcSig, outcome: "unknown" } : {}),
+        },
       });
+
       const msg = mintErr instanceof Error ? mintErr.message : String(mintErr);
+
+      if (unresolved) {
+        return NextResponse.json(
+          {
+            error:
+              "USDC mint was broadcast, but confirmation is still pending. " +
+              "Do not retry until the claim window expires or the transaction is reconciled.",
+            detail: msg,
+            pending: true,
+            retryable: false,
+            usdc_sig: usdcSig,
+            nextClaimAt: pendingNextClaimAt,
+          },
+          { status: 503 },
+        );
+      }
+
       return NextResponse.json(
         { error: `USDC mint failed: ${msg}`, retryable: true },
         { status: 503 },
       );
     }
+    if (!usdcSig) {
+      throw new Error("USDC mint completed without a transaction signature");
+    }
 
-    // Record claim AFTER on-chain success — don't lock wallet on partial failure
+    // Confirmed mint: record the process-local claim timestamp. Unknown
+    // post-broadcast outcomes are retained in the catch path above instead.
     const nextClaimAt = recordClaim(walletAddress);
 
     // ── Small SOL airdrop (best-effort, 3 s timeout per attempt) ──────────
