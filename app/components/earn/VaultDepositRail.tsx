@@ -60,6 +60,7 @@ export function VaultDepositRail({ slab, vault, onTxSuccess, onPositionResolved 
 function VaultDepositRailInner({ slab, vault, onTxSuccess, onPositionResolved }: VaultDepositRailProps & { slab: string }) {
   const { state, loading, deposit, withdraw, refreshState } = useInsuranceLP();
   const { config } = useSlabState();
+  const vaultAvailable = state.registryExists && state.mintExists;
 
   // Latch "we've completed at least one load" so the "not initialized" warning
   // is driven by the durable `state.registryExists` fact, not by the transient
@@ -144,9 +145,9 @@ function VaultDepositRailInner({ slab, vault, onTxSuccess, onPositionResolved }:
             </div>
           )}
 
-          {everLoaded && !state.registryExists && (
+          {everLoaded && !vaultAvailable && (
             <p className="mt-3 border-t border-[var(--border)]/60 pt-3 text-[11px] text-[var(--text-secondary)]">
-              LP-vault deposits aren&apos;t available on this market — these playground markets run without the optional Earn vault.
+              This market does not have a usable on-chain Earn LP vault. Deposits and withdrawals are unavailable here.
             </p>
           )}
         </div>
@@ -158,6 +159,7 @@ function VaultDepositRailInner({ slab, vault, onTxSuccess, onPositionResolved }:
         userLpBalance={state.userLpBalance}
         vaultBalance={state.vaultTotalAtoms}
         lpSupply={state.lpSupply}
+        vaultAvailable={vaultAvailable}
         decimals={collateralDecimals}
         collateralSymbol={collateralSymbol}
         loading={loading}

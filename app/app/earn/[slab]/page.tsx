@@ -163,6 +163,8 @@ function VaultDetailInner({ slabAddress }: { slabAddress: string }) {
   }, [marketInfo, earnLoading, slabAddress]);
 
   const loading = lpVaultLoading || earnLoading;
+  const vaultAvailable =
+    lpVaultState.registryExists && lpVaultState.mintExists;
 
   // Callbacks
   const handleDeposit = useCallback(
@@ -259,14 +261,14 @@ function VaultDetailInner({ slabAddress }: { slabAddress: string }) {
           </div>
         )}
 
-        {/* Not Initialized Warning */}
-        {!loading && !lpVaultState.registryExists && (
+        {/* Earn vault availability warning */}
+        {!loading && !vaultAvailable && (
           <div className="mb-6 border border-[var(--warning)]/30 bg-[var(--warning)]/5 rounded-sm px-4 py-3">
             <p className="text-[12px] font-medium text-[var(--warning)]">
-              ⚠ Vault Not Initialized
+              Earn Vault Unavailable
             </p>
             <p className="text-[11px] text-[var(--text-secondary)] mt-1">
-              This market&apos;s LP vault pool has not been created on-chain yet. Deposits and withdrawals are unavailable until the pool is initialized by the market deployer.
+              This market does not have a usable on-chain Earn LP vault. Deposits and withdrawals are unavailable here.
             </p>
           </div>
         )}
@@ -373,6 +375,7 @@ function VaultDetailInner({ slabAddress }: { slabAddress: string }) {
               userLpBalance={lpVaultState.userLpBalance}
               vaultBalance={lpVaultState.vaultTotalAtoms}
               lpSupply={lpVaultState.lpSupply}
+              vaultAvailable={vaultAvailable}
               decimals={collateralDecimals}
               collateralSymbol={collateralSymbol}
               loading={loading || lpVaultLoading}
@@ -423,7 +426,7 @@ function VaultDetailInner({ slabAddress }: { slabAddress: string }) {
               />
               <InfoRow
                 label="Pool Status"
-                value={lpVaultState.registryExists ? 'Active' : 'Not Initialized'}
+                value={vaultAvailable ? 'Active' : 'Unavailable'}
               />
             </div>
           </div>

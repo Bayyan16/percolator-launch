@@ -34,6 +34,8 @@ interface DepositWithdrawPanelProps {
   vaultBalance: bigint;
   /** LP supply */
   lpSupply: bigint;
+  /** Whether both the LP Vault Registry and LP mint exist on-chain. */
+  vaultAvailable: boolean;
   /** Collateral decimals */
   decimals: number;
   /** Collateral symbol (e.g. USDC) */
@@ -67,6 +69,7 @@ export function DepositWithdrawPanel({
   userLpBalance,
   vaultBalance,
   lpSupply,
+  vaultAvailable,
   decimals,
   collateralSymbol,
   loading,
@@ -113,43 +116,43 @@ export function DepositWithdrawPanel({
 
   // Preview shares for deposit
   const previewShares = useMemo(() => {
-    if (rawAmount <= 0n) return 0n;
+    if (!vaultAvailable || rawAmount <= 0n) return 0n;
     if (lpSupply === 0n || vaultBalance === 0n) return rawAmount; // 1:1 initial mint
     return (rawAmount * lpSupply) / vaultBalance;
-  }, [rawAmount, lpSupply, vaultBalance]);
+  }, [vaultAvailable, rawAmount, lpSupply, vaultBalance]);
 
   // Preview collateral for withdrawal
   const previewCollateral = useMemo(() => {
-    if (rawAmount <= 0n) return 0n;
+    if (!vaultAvailable || rawAmount <= 0n) return 0n;
     if (lpSupply === 0n) return 0n;
     return (rawAmount * vaultBalance) / lpSupply;
-  }, [rawAmount, lpSupply, vaultBalance]);
+  }, [vaultAvailable, rawAmount, lpSupply, vaultBalance]);
 
   const maxAmount = useMemo(() => {
     const raw = tab === 'deposit' ? userBalance : userLpBalance;
     return formatRaw(raw, decimals);
   }, [tab, userBalance, userLpBalance, decimals]);
 
-  const displayMaxAmount = loading ? '—' : maxAmount;
+  const displayMaxAmount = loading || !vaultAvailable ? '—' : maxAmount;
 
   const handleSetMax = useCallback(() => {
-    if (loading) return;
+    if (loading || !vaultAvailable) return;
     setAmount(maxAmount);
-  }, [loading, maxAmount]);
+  }, [loading, vaultAvailable, maxAmount]);
 
   const handleSetPercent = useCallback(
     (pct: number) => {
-      if (loading) return;
+      if (loading || !vaultAvailable) return;
 
       const raw = tab === 'deposit' ? userBalance : userLpBalance;
       const partial = (raw * BigInt(pct)) / 100n;
       setAmount(formatRaw(partial, decimals));
     },
-    [loading, tab, userBalance, userLpBalance, decimals],
+    [loading, vaultAvailable, tab, userBalance, userLpBalance, decimals],
   );
 
   const handleSubmit = useCallback(async () => {
-    if (rawAmount <= 0n) return;
+    if (!vaultAvailable || rawAmount <= 0n) return;
 
     // Withdrawals use a two-step confirm flow
     if (tab === 'withdraw' && !withdrawConfirming) {
@@ -184,14 +187,14 @@ export function DepositWithdrawPanel({
     } finally {
       setSubmitting(false);
     }
-  }, [rawAmount, tab, withdrawConfirming, onDeposit, onWithdraw]);
+  }, [vaultAvailable, rawAmount, tab, withdrawConfirming, onDeposit, onWithdraw]);
 
   // S1 fix: claim an already-requested redemption. Deliberately bypasses the
   // rawAmount/userLpBalance gate below — a full ("Max") redemption request
   // zeroes userLpBalance, which would otherwise make ExecuteRedemption
   // permanently unreachable through the normal form.
   const handleClaimRedemption = useCallback(async () => {
-    if (claimSubmitting || loading || !cooldownElapsed) return;
+    if (claimSubmitting || loading || !vaultAvailable || !cooldownElapsed) return;
     setClaimSubmitting(true);
     setClaimError(null);
     setClaimSuccess(null);
@@ -207,11 +210,11 @@ export function DepositWithdrawPanel({
     } finally {
       setClaimSubmitting(false);
     }
-  }, [claimSubmitting, loading, cooldownElapsed, onWithdraw, pendingRedemptionShares]);
+  }, [claimSubmitting, loading, vaultAvailable, cooldownElapsed, onWithdraw, pendingRedemptionShares]);
 
   // Validation
   const isValid = useMemo(() => {
-    if (loading) return false;
+    if (loading || !vaultAvailable) return false;
     if (rawAmount <= 0n) return false;
     if (tab === 'deposit' && rawAmount > userBalance) return false;
     if (tab === 'withdraw') {
@@ -219,7 +222,15 @@ export function DepositWithdrawPanel({
       if (!cooldownElapsed) return false;
     }
     return true;
-  }, [loading, rawAmount, tab, userBalance, userLpBalance, cooldownElapsed]);
+  }, [
+    loading,
+    vaultAvailable,
+    rawAmount,
+    tab,
+    userBalance,
+    userLpBalance,
+    cooldownElapsed,
+  ]);
 
   if (!connected) {
     return (
@@ -291,7 +302,7 @@ export function DepositWithdrawPanel({
 
           <GlowButton
             onClick={handleClaimRedemption}
-            disabled={!cooldownElapsed || claimSubmitting || loading}
+            disabled={!vaultAvailable || !cooldownElapsed || claimSubmitting || loading}
             variant="primary"
             size="lg"
             className="w-full"
@@ -314,8 +325,9 @@ export function DepositWithdrawPanel({
             </label>
             <button
               onClick={handleSetMax}
+              disabled={loading || !vaultAvailable}
               aria-label={`Set maximum amount: ${displayMaxAmount} ${tab === 'deposit' ? collateralSymbol : 'LP'}`}
-              className="text-[10px] text-[var(--accent)] hover:text-[var(--accent)]/80 transition-colors"
+              className="text-[10px] text-[var(--accent)] hover:text-[var(--accent)]/80 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
             >
               Max: {displayMaxAmount} {tab === 'deposit' ? collateralSymbol : 'LP'}
             </button>
@@ -328,6 +340,7 @@ export function DepositWithdrawPanel({
               inputMode="decimal"
               placeholder="0.00"
               value={amount}
+              disabled={loading || !vaultAvailable}
               onChange={(e) => {
                 const v = e.target.value;
                 if (/^\d*\.?\d*$/.test(v)) setAmount(v);
@@ -345,7 +358,8 @@ export function DepositWithdrawPanel({
               <button
                 key={pct}
                 onClick={() => handleSetPercent(pct)}
-                className="flex-1 py-1.5 text-[10px] font-medium border border-[var(--border)] rounded-sm text-[var(--text-secondary)] hover:border-[var(--accent)]/30 hover:text-[var(--text)] transition-all"
+                disabled={loading || !vaultAvailable}
+                className="flex-1 py-1.5 text-[10px] font-medium border border-[var(--border)] rounded-sm text-[var(--text-secondary)] hover:border-[var(--accent)]/30 hover:text-[var(--text)] transition-all disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {pct}%
               </button>
@@ -354,7 +368,7 @@ export function DepositWithdrawPanel({
         </div>
 
         {/* Preview */}
-        {rawAmount > 0n && tab === 'deposit' && (
+        {vaultAvailable && rawAmount > 0n && tab === 'deposit' && (
           <div className="mb-4 p-3 bg-[var(--bg)] border border-[var(--border)] rounded-sm">
             <div className="text-[10px] uppercase tracking-[0.15em] text-[var(--text-secondary)] mb-2">
               You will receive
@@ -373,7 +387,7 @@ export function DepositWithdrawPanel({
         )}
 
         {/* Withdrawal preview */}
-        {rawAmount > 0n && tab === 'withdraw' && (
+        {vaultAvailable && rawAmount > 0n && tab === 'withdraw' && (
           <div className={`mb-4 p-3 border rounded-sm ${
             withdrawConfirming
               ? 'bg-[var(--warning)]/5 border-[var(--warning)]/30'
@@ -451,7 +465,7 @@ export function DepositWithdrawPanel({
         )}
 
         {/* Cooldown warning — shown when no amount entered yet */}
-        {tab === 'withdraw' && !cooldownElapsed && rawAmount === 0n && (
+        {vaultAvailable && tab === 'withdraw' && !cooldownElapsed && rawAmount === 0n && (
           <div className="mb-4 p-3 bg-[var(--warning)]/5 border border-[var(--warning)]/20 rounded-sm">
             <p className="text-[11px] text-[var(--warning)]">
               Cooldown period has not elapsed. You cannot withdraw yet.
