@@ -1159,6 +1159,15 @@ async function attemptFreshBatchedLaunch(ctx: FreshBatchContext): Promise<FreshB
       signers: [lpPortfolioKp, matcherCtxKp],
     };
 
+    // Keeper mode inserts UpdateAssetAuthority(Oracle -> keeper) before M2/M3.
+    // A fresh asset begins at authorityEpoch=0; that authority mutation
+    // advances the shared asset authority-epoch CAS lane to 1.
+    //
+    // All CAS-bound transactions below are pre-signed before the delegation
+    // lands, so they must encode the deterministic POST-delegation epoch.
+    // Non-keeper launches do not mutate this lane here and remain at 0.
+    const postCosignAuthorityEpoch = cosignTx ? 1n : 0n;
+
     // M3a: DepositCollateral + 2x TopUpBackingBucket (deadlock-prevention seed)
     const depositIx = buildIx({
       programId,
@@ -1201,7 +1210,7 @@ async function attemptFreshBatchedLaunch(ctx: FreshBatchContext): Promise<FreshB
           domain,
           marketId: 1n,
           intentId: BigInt(domain) + 1n,
-          authorityEpoch: 0n,
+          authorityEpoch: postCosignAuthorityEpoch,
           amount: backingSeed.toString(),
           expirySlot: MAX_BACKING_BUCKET_EXPIRY_SLOT.toString(),
         }),
@@ -1228,7 +1237,7 @@ async function attemptFreshBatchedLaunch(ctx: FreshBatchContext): Promise<FreshB
       data: encodeTopUpInsurance({
         marketId: 1n,
         intentId: 3n,
-        authorityEpoch: 0n,
+        authorityEpoch: postCosignAuthorityEpoch,
         amount: params.insuranceAmount.toString(),
       }),
     });
@@ -1297,7 +1306,7 @@ async function attemptFreshBatchedLaunch(ctx: FreshBatchContext): Promise<FreshB
           // authority_epoch lane; on a brand-new market that lane is 0. This runs
           // BEFORE StakeInitPool rotates marketauth, so the creator is still the
           // gating authority.
-          const feeSplitV18 = { ...feeSplitArgs, authorityEpoch: 0n };
+          const feeSplitV18 = { ...feeSplitArgs, authorityEpoch: postCosignAuthorityEpoch };
           const reason = validateFeeSplit(feeSplitV18);
           if (reason) throw new Error(`Invalid fee split: ${reason}`);
           return buildIx({
@@ -1566,9 +1575,18 @@ async function attemptFreshBatchedLaunch(ctx: FreshBatchContext): Promise<FreshB
     };
 
     const m1Sig = await broadcastTailTx(0);
-    setState((s) => ({ ...s, slabAddress: slabPk.toBase58() }));
+
+    // M1 always completes sequential Step 0. For a keeper launch, Step 1
+    // is NOT complete until the keeper co-sign/delegation below lands.
+    // Keep React state and the persisted recovery cursor synchronized.
+    const afterM1Step = signedCosign ? 1 : 2;
+    setState((s) => ({
+      ...s,
+      slabAddress: slabPk.toBase58(),
+      step: afterM1Step,
+    }));
     advanceLanding(m1Sig);
-    updateInFlightStep(slabPk.toBase58(), 2);
+    updateInFlightStep(slabPk.toBase58(), afterM1Step);
 
     // ZOMBIE-MARKET FIX (2026-07-27): this POST is what makes a market VISIBLE
     // in the app. It used to fire here, immediately after M1, in parallel with
@@ -1600,10 +1618,19 @@ async function attemptFreshBatchedLaunch(ctx: FreshBatchContext): Promise<FreshB
     if (signedCosign) {
       const cosignSig = await broadcastSignedTx(connection, signedCosign);
       advanceLanding(cosignSig);
+
+      // Keeper delegation is the remaining work in sequential Step 1.
+      // Only after it lands may recovery skip Step 1.
+      setState((s) => ({ ...s, step: 2 }));
+      updateInFlightStep(slabPk.toBase58(), 2);
     }
 
     const m2Sig = await broadcastTailTx(1);
     advanceLanding(m2Sig);
+
+    // M2 completes LP portfolio + matcher setup. If M3a fails, both the
+    // visible Retry button and persisted recovery must resume at Step 3.
+    setState((s) => ({ ...s, step: 3 }));
     updateInFlightStep(slabPk.toBase58(), 3);
 
     const m3aSig = await broadcastTailTx(2);
@@ -1711,6 +1738,7 @@ async function attemptFreshBatchedLaunch(ctx: FreshBatchContext): Promise<FreshB
       // No insurance requested — the crank alone stays best-effort.
       console.warn("[useCreateMarket] batch: post-LP crank failed (non-fatal):", m3bError);
     }
+    setState((s) => ({ ...s, step: 4 }));
     updateInFlightStep(slabPk.toBase58(), 4);
 
     // #2464: started HERE, not above — everything that can fail the launch has
@@ -1725,6 +1753,7 @@ async function attemptFreshBatchedLaunch(ctx: FreshBatchContext): Promise<FreshB
     // and never drags in the much larger/riskier M4b bundle.
     const m4aSig = await broadcastTailTx(4);
     advanceLanding(m4aSig);
+    setState((s) => ({ ...s, step: 5 }));
     updateInFlightStep(slabPk.toBase58(), 5);
 
     // M4b: mint/vault creation + [UpdateFeeSplit] + StakeInitPool + BindInsuranceAuthority.
