@@ -7,6 +7,7 @@ import { useMultiTokenMeta } from "@/hooks/useMultiTokenMeta";
 import { describeLiqPrice } from "@/lib/liq-price-display";
 import { describeEntryPrice } from "@/lib/entry-price-display";
 import { UNKNOWN_ENTRY_TOOLTIP } from "@/lib/trading";
+import { useLivePortfolioMetrics, type LivePositionMetric } from "@/hooks/useLivePortfolioMetrics";
 import { LiqPriceValue } from "@/components/trade/LiqPriceValue";
 
 import { GlowButton } from "@/components/ui/GlowButton";
@@ -26,7 +27,17 @@ function formatPnlPct(pct: number): string {
   return `${sign}${pct.toFixed(2)}%`;
 }
 
-function PositionCard({ pos, symbol, decimals = 6 }: { pos: PortfolioPosition; symbol: string; decimals?: number }) {
+function PositionCard({
+  pos,
+  live,
+  symbol,
+  decimals = 6,
+}: {
+  pos: PortfolioPosition;
+  live: LivePositionMetric;
+  symbol: string;
+  decimals?: number;
+}) {
   // Exposure actually carried (ADL-adjusted); equals nominal basis on
   // markets that never deleveraged. See lib/v17-adl.ts.
   const posSize = pos.effectiveSize;
@@ -34,14 +45,17 @@ function PositionCard({ pos, symbol, decimals = 6 }: { pos: PortfolioPosition; s
   const sizeAbs = posSize < 0n ? -posSize : posSize;
   const severity = getLiquidationSeverity(pos.liquidationDistancePct);
   const hasPosition = posSize !== 0n;
-  // PERC-297: Guard PnL display when oracle price is unavailable
-  const hasValidOracle = pos.oraclePriceE6 > 0n;
-  // #2660: v17/v18 store no entry on-chain — `account.entryPrice` is always 0n,
-  // so reading it rendered "—" for every position. Use the resolved entry and
-  // its source; on "unknown" the resolved value is the MARK and the hook's
-  // unrealizedPnl is a 0 placeholder, so neither may be shown as a number.
-  const entryDisplay = describeEntryPrice({ entryE6: pos.effectiveEntryPrice, source: pos.entryPriceSource });
-  const pnlIsKnown = hasValidOracle && entryDisplay.known;
+  const markE6 = live.markE6;
+
+  // #2660/#2671: keep the Entry cell's trust verdict aligned with the shared
+  // live metric. Unknown entry still renders "--", never fake zero PnL.
+  const entryDisplay = describeEntryPrice({
+    entryE6: pos.effectiveEntryPrice,
+    source: pos.entryPriceSource,
+  });
+  const hasValidOracle = markE6 > 0n;
+  const pnlIsKnown = live.pnlKnown;
+
   // Cross-margin: where collateral covers the position there is no liquidation
   // price, and a bare "—" says nothing about risk. Show margin health instead
   // (#2634 / #2558) — one shared derivation, see lib/liq-price-display.ts.
@@ -109,15 +123,15 @@ function PositionCard({ pos, symbol, decimals = 6 }: { pos: PortfolioPosition; s
             {pnlIsKnown ? (
               <>
                 <span
-                  className={`text-[11px] font-bold ${pos.unrealizedPnl >= 0n ? "text-[var(--long)]" : "text-[var(--short)]"}`}
+                  className={`text-[11px] font-bold ${live.pnl >= 0n ? "text-[var(--long)]" : "text-[var(--short)]"}`}
                   style={{ fontFamily: "var(--font-jetbrains-mono)" }}
                 >
-                  {formatPnl(pos.unrealizedPnl, decimals)}
+                  {formatPnl(live.pnl, decimals)}
                 </span>
                 <span
-                  className={`ml-1 text-[9px] ${pos.pnlPercent >= 0 ? "text-[var(--long)]/70" : "text-[var(--short)]/70"}`}
+                  className={`ml-1 text-[9px] ${live.pnlPercent >= 0 ? "text-[var(--long)]/70" : "text-[var(--short)]/70"}`}
                 >
-                  {formatPnlPct(pos.pnlPercent)}
+                  {formatPnlPct(live.pnlPercent)}
                 </span>
               </>
             ) : (
@@ -149,7 +163,7 @@ function PositionCard({ pos, symbol, decimals = 6 }: { pos: PortfolioPosition; s
           <div>
             <span className="text-[var(--text-secondary)]">Mark: </span>
             <span className="text-[var(--text-secondary)]" style={{ fontFamily: "var(--font-jetbrains-mono)" }}>
-              {pos.oraclePriceE6 > 0n ? formatUsdPriceE6(pos.oraclePriceE6) : "—"}
+              {markE6 > 0n ? formatUsdPriceE6(markE6) : "—"}
             </span>
           </div>
           <div>
@@ -211,6 +225,11 @@ export function PositionSummary() {
   const positions = ((portfolio.positions ?? []) as PortfolioPosition[]).filter(isOpenPosition);
   const loading = portfolio.loading;
 
+  const liveMetrics = useLivePortfolioMetrics(
+    portfolio.positions ?? [],
+    portfolio.totalDeposited ?? 0n,
+  );
+
   // v17 markets return an empty `market.config` from the SDK (real value in
   // `market.configV17.collateralMint`) — use the pre-resolved `pos.collateralMint`
   // (set by usePortfolio) instead of `pos.market.config.collateralMint`, which is
@@ -259,6 +278,7 @@ export function PositionSummary() {
               <PositionCard
                 key={`${pos.slabAddress}-${i}`}
                 pos={pos}
+                live={liveMetrics.bySlab.get(pos.slabAddress)!}
                 symbol={
                   // P1: label by the market's own symbol (e.g. "SOL-PERP"), not the
                   // collateral token — sim-USDC is the SAME collateral across every

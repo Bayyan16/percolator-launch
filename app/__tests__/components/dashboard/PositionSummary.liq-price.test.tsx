@@ -1,67 +1,235 @@
-/**
- * #2634: the dashboard's PositionSummary rendered a literal "—" for Liq
- * wherever collateral covers the position (no liquidation price) — the exact
- * symptom #2558 fixed on four other surfaces. It must show margin health.
+﻿/**
+ * #2634: dashboard PositionSummary liquidation display.
+ *
+ * Live-PnL follow-up: PositionSummary labels Mark / PnL / ROE as current
+ * position state, so it must consume the same shared live mark as the header
+ * instead of waiting for usePortfolio's slower scan snapshot.
  */
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const state = vi.hoisted(() => ({ positions: [] as unknown[] }));
+const state = vi.hoisted(() => ({
+  positions: [] as any[],
+  priceE6: null as bigint | null,
+  listeners: new Set<() => void>(),
+}));
 
 vi.mock("next/link", () => ({
-  default: ({ children, href }: { children: React.ReactNode; href: string }) => <a href={href}>{children}</a>,
+  default: ({
+    children,
+    href,
+  }: {
+    children: React.ReactNode;
+    href: string;
+  }) => <a href={href}>{children}</a>,
 }));
+
 vi.mock("@/hooks/usePortfolio", () => ({
-  usePortfolio: () => ({ positions: state.positions, loading: false }),
+  usePortfolio: () => ({
+    positions: state.positions,
+    loading: false,
+  }),
   getLiquidationSeverity: () => "safe",
-  isOpenPosition: (p: { account?: { positionSize?: bigint } }) => (p.account?.positionSize ?? 0n) !== 0n,
+  isOpenPosition: (p: { account?: { positionSize?: bigint } }) =>
+    (p.account?.positionSize ?? 0n) !== 0n,
 }));
-vi.mock("@/hooks/useMultiTokenMeta", () => ({ useMultiTokenMeta: () => new Map() }));
-vi.mock("@/hooks/useWalletCompat", () => ({ useWalletCompat: () => ({ connected: true }) }));
-vi.mock("@/components/ui/GlowButton", () => ({ GlowButton: ({ children }: { children: React.ReactNode }) => <button>{children}</button> }));
-vi.mock("@/components/ui/ShimmerSkeleton", () => ({ ShimmerSkeleton: () => null }));
+
+vi.mock("@/hooks/useMultiTokenMeta", () => ({
+  useMultiTokenMeta: () => new Map(),
+}));
+
+vi.mock("@/hooks/useWalletCompat", () => ({
+  useWalletCompat: () => ({ connected: true }),
+}));
+
+vi.mock("@/components/ui/GlowButton", () => ({
+  GlowButton: ({ children }: { children: React.ReactNode }) => (
+    <button>{children}</button>
+  ),
+}));
+
+vi.mock("@/components/ui/ShimmerSkeleton", () => ({
+  ShimmerSkeleton: () => null,
+}));
+
+vi.mock("@/lib/priceStore/priceStore", () => ({
+  subscribeSlab: (_slab: string, cb: () => void) => {
+    state.listeners.add(cb);
+    return () => {
+      state.listeners.delete(cb);
+    };
+  },
+  getSnapshot: () => ({
+    priceE6: state.priceE6,
+    priceUsd:
+      state.priceE6 != null
+        ? Number(state.priceE6) / 1_000_000
+        : null,
+  }),
+}));
 
 import { PositionSummary } from "@/components/dashboard/PositionSummary";
+import { computeLivePositionPnl } from "@/lib/trading";
+
+const ENTRY_E6 = 100_000_000n;
+const STALE_MARK_E6 = 120_000_000n;
+const LIVE_MARK_E6 = 100_000_000n;
+const SIZE = -1_000_000n;
+const CAPITAL = 50_000_000n;
+const INITIAL_MARGIN_BPS = 1_000n;
 
 const pos = (over: Record<string, unknown>) => ({
   slabAddress: "Slab111111111111111111111111111111111111111",
   symbol: "SOL-PERP",
   collateralMint: { toBase58: () => "Mint" },
+
   effectiveSize: 1_000_000n,
   leverage: 1,
+
   liquidationDistancePct: 100,
+  liquidationPriceE6: 0n,
+
   oraclePriceE6: 100_000_000n,
   unrealizedPnl: 0n,
   pnlPercent: 0,
+
+  initialMarginBps: INITIAL_MARGIN_BPS,
   maintenanceMarginBps: 500n,
-  // GH#2660: "onchain" was never a member of EntryPriceSource ("cache" |
-  // "derived" | "unknown"), and v17 stores no entry price, so
-  // `account.entryPrice` is structurally 0n. Both fields were impossible, and
-  // the non-zero raw entry is what hid the dashboard's Entry-cell defect.
+
+  // GH#2660: v17 has no native entry field. Use a resolved source rather
+  // than allowing the mark placeholder to masquerade as Entry.
   effectiveEntryPrice: 100_000_000n,
   entryPriceSource: "cache",
-  account: { positionSize: 1_000_000n, capital: 200_000_000n, entryPrice: 0n },
-  liquidationPriceE6: 0n,
+
+  account: {
+    positionSize: 1_000_000n,
+    capital: 200_000_000n,
+    entryPrice: 0n,
+  },
+
   ...over,
+});
+
+function livePosition() {
+  const stale = computeLivePositionPnl(
+    SIZE,
+    ENTRY_E6,
+    STALE_MARK_E6,
+    INITIAL_MARGIN_BPS,
+    CAPITAL,
+    0n,
+    0,
+  );
+
+  return pos({
+    symbol: "SOLCAT-PERP",
+    effectiveSize: SIZE,
+    effectiveEntryPrice: ENTRY_E6,
+    entryPriceSource: "cache",
+    oraclePriceE6: STALE_MARK_E6,
+    unrealizedPnl: stale.pnl,
+    pnlPercent: stale.pnlPercent,
+    initialMarginBps: INITIAL_MARGIN_BPS,
+    maintenanceMarginBps: 500n,
+    account: {
+      positionSize: SIZE,
+      capital: CAPITAL,
+      entryPrice: 0n,
+    },
+  });
+}
+
+function pct(n: number) {
+  return `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
+}
+
+function publishLivePrice(priceE6: bigint) {
+  state.priceE6 = priceE6;
+  for (const listener of Array.from(state.listeners)) {
+    listener();
+  }
+}
+
+beforeEach(() => {
+  state.positions = [];
+  state.priceE6 = null;
+  state.listeners.clear();
 });
 
 describe("PositionSummary Liq cell", () => {
   it("shows margin health, not a bare dash, when collateral covers the position", () => {
     state.positions = [pos({})];
+
     render(<PositionSummary />);
+
     expect(screen.getByText("200% mgn")).toBeInTheDocument();
   });
 
   it("shows the price when a liquidation price exists", () => {
-    state.positions = [pos({ liquidationPriceE6: 80_000_000n, account: { positionSize: 1_000_000n, capital: 50_000_000n, entryPrice: 0n } })];
+    state.positions = [
+      pos({
+        liquidationPriceE6: 80_000_000n,
+        account: {
+          positionSize: 1_000_000n,
+          capital: 50_000_000n,
+          entryPrice: 0n,
+        },
+      }),
+    ];
+
     render(<PositionSummary />);
+
     expect(screen.queryByText(/mgn/)).toBeNull();
     expect(screen.getByText(/80/)).toBeInTheDocument();
   });
 
   it("does not present an unresolved entry as covered", () => {
     state.positions = [pos({ entryPriceSource: "unknown" })];
+
     render(<PositionSummary />);
+
     expect(screen.queryByText(/mgn/)).toBeNull();
+  });
+});
+
+describe("PositionSummary live PnL freshness", () => {
+  it("CONTROL: keeps the portfolio snapshot result while the live mark has not moved", () => {
+    const position = livePosition();
+    state.positions = [position];
+    state.priceE6 = STALE_MARK_E6;
+
+    render(<PositionSummary />);
+
+    expect(
+      screen.getByText(pct(position.pnlPercent)),
+    ).toBeInTheDocument();
+  });
+
+  it("recomputes Mark / PnL / ROE when the shared live mark changes", async () => {
+    const position = livePosition();
+    state.positions = [position];
+    state.priceE6 = STALE_MARK_E6;
+
+    const live = computeLivePositionPnl(
+      SIZE,
+      ENTRY_E6,
+      LIVE_MARK_E6,
+      INITIAL_MARGIN_BPS,
+      CAPITAL,
+      0n,
+      0,
+    );
+
+    render(<PositionSummary />);
+
+    act(() => {
+      publishLivePrice(LIVE_MARK_E6);
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(pct(live.pnlPercent)),
+      ).toBeInTheDocument();
+    });
   });
 });

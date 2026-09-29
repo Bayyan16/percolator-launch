@@ -1,6 +1,7 @@
 "use client";
 
-import { usePortfolio, isOpenPosition } from "@/hooks/usePortfolio";
+import { usePortfolio } from "@/hooks/usePortfolio";
+import { useLivePortfolioMetrics } from "@/hooks/useLivePortfolioMetrics";
 import { useWalletCompat } from "@/hooks/useWalletCompat";
 import { formatTokenAmount } from "@/lib/format";
 import { useState } from "react";
@@ -36,13 +37,15 @@ function CopyableAddress({ address }: { address: string }) {
 export function DashboardHeader() {
   const { publicKey } = useWalletCompat();
   const portfolio = usePortfolio();
+  const liveMetrics = useLivePortfolioMetrics(
+    portfolio.positions ?? [],
+    portfolio.totalDeposited ?? 0n,
+  );
 
   const address = publicKey?.toBase58() ?? "";
-  const totalValue = portfolio.totalValue ?? 0n;
-  const totalPnl = portfolio.totalUnrealizedPnl ?? 0n;
-  // Count OPEN positions only — a closed (size-0 "Flat") position still has a
-  // portfolio account and would otherwise inflate the "Active Positions" stat.
-  const positionCount = (portfolio.positions ?? []).filter(isOpenPosition).length;
+  const totalValue = liveMetrics.totalValue;
+  const totalPnl = liveMetrics.totalUnrealizedPnl;
+  const positionCount = liveMetrics.openPositions.length;
 
   const displayValue = totalValue > 0n
     ? formatTokenAmount(totalValue)

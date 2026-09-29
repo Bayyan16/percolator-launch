@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo } from "react";
-import { usePortfolio, isOpenPosition } from "@/hooks/usePortfolio";
+import { usePortfolio } from "@/hooks/usePortfolio";
+import { useLivePortfolioMetrics } from "@/hooks/useLivePortfolioMetrics";
 
 function formatUsd(val: number): string {
   if (val === 0) return "--";
@@ -15,25 +15,26 @@ function formatTradeFeeBps(bps: bigint): string {
 }
 
 export function StatsBar() {
-  const { positions: allPositions, loading } = usePortfolio();
+  const portfolio = usePortfolio();
+  const liveMetrics = useLivePortfolioMetrics(
+    portfolio.positions,
+    portfolio.totalDeposited,
+  );
 
-  // Stats reflect OPEN positions only — closed (size-0 "Flat") positions still
-  // carry a portfolio account and would otherwise skew the "empty state" checks
-  // and per-market fee readout. Memoized so downstream memos stay referentially
-  // stable across renders. (Win/loss already ignore flat rows via the >0/<0 PnL
-  // test; this also fixes the length-based cases below.)
-  const positions = useMemo(() => allPositions.filter(isOpenPosition), [allPositions]);
+  const loading = portfolio.loading;
+  const positions = liveMetrics.openPositions;
 
-  // Calculate real stats from portfolio positions (memoized — pure over `positions`)
-  const { totalPnl, wins, losses, total, inProfitPct } = useMemo(() => {
-    const totalPnlRaw = positions.reduce((sum, p) => sum + (p.unrealizedPnl ?? 0n), 0n);
-    const totalPnl = Number(totalPnlRaw) / 1e6; // e6 → human
-    const wins = positions.filter((p) => (p.unrealizedPnl ?? 0n) > 0n).length;
-    const losses = positions.filter((p) => (p.unrealizedPnl ?? 0n) < 0n).length;
-    const total = wins + losses;
-    const inProfitPct = total > 0 ? ((wins / total) * 100).toFixed(0) : null;
-    return { totalPnl, wins, losses, total, inProfitPct };
-  }, [positions]);
+  // Current mark-to-market aggregate from the shared price store.
+  // This keeps Dashboard StatsBar aligned with PositionSummary, PnlChart,
+  // DashboardHeader, PositionsBar and the trade terminal.
+  const totalPnl = Number(liveMetrics.totalUnrealizedPnl) / 1e6;
+  const wins = liveMetrics.wins;
+  const losses = liveMetrics.losses;
+  const total = wins + losses;
+  const inProfitPct =
+    liveMetrics.inProfitPct == null
+      ? null
+      : liveMetrics.inProfitPct.toFixed(0);
 
   // M15: v17 has no maker/taker fee split — "Fee Tier" used to fabricate one
   // (a hardcoded "Maker 0.02% / Taker 0.06%" that doesn't exist in the

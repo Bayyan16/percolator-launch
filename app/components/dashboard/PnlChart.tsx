@@ -1,6 +1,7 @@
 "use client";
 
-import { usePortfolio, isOpenPosition } from "@/hooks/usePortfolio";
+import { usePortfolio } from "@/hooks/usePortfolio";
+import { useLivePortfolioMetrics } from "@/hooks/useLivePortfolioMetrics";
 
 /**
  * PnL Chart — shows real portfolio PnL.
@@ -14,16 +15,15 @@ import { usePortfolio, isOpenPosition } from "@/hooks/usePortfolio";
  * equity-snapshot source exists; the header states what the number is.
  */
 export function PnlChart() {
-  const { totalUnrealizedPnl, positions, loading } = usePortfolio();
+  const portfolio = usePortfolio();
+  const liveMetrics = useLivePortfolioMetrics(
+    portfolio.positions,
+    portfolio.totalDeposited,
+  );
 
-  // Only OPEN positions contribute PnL — exclude closed (size-0 "Flat") ones so
-  // the "Across N positions" caption matches the real open-position count.
-  const openPositions = positions.filter(isOpenPosition);
-
-  // Use totalUnrealizedPnl (mark-to-market, already guarded against u64::MAX sentinels)
-  // rather than totalPnl (raw account.pnl sum) which can contain uninitialized sentinel
-  // values producing septillion-dollar overflow display (GH#1352).
-  const pnlFloat = Number(totalUnrealizedPnl) / 1e6;
+  const openPositions = liveMetrics.openPositions;
+  const loading = portfolio.loading;
+  const pnlFloat = Number(liveMetrics.totalUnrealizedPnl) / 1e6;
   const isPositive = pnlFloat >= 0;
   const hasData = openPositions.length > 0;
 
