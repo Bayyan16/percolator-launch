@@ -1,7 +1,7 @@
 "use client";
 
 import { FC } from "react";
-import { computeMarkPnl, computeMarkPnlCollateral, computePnlPercent, computePositionInitialMargin } from "@/lib/trading";
+import { computeMarkPnl, computeMarkPnlCollateral, computePnlPercent, computePositionInitialMargin, resolveEntryPrice } from "@/lib/trading";
 import { useUserAccount } from "@/hooks/useUserAccount";
 import { useLivePrice } from "@/hooks/useLivePrice";
 import { useSlabState } from "@/components/providers/SlabProvider";
@@ -9,6 +9,8 @@ import { useTokenMeta } from "@/hooks/useTokenMeta";
 import { isMockMode } from "@/lib/mock-mode";
 import { isMockSlab, getMockUserAccount } from "@/lib/mock-trade-data";
 import { getEntryPrice } from "@/lib/entry-price";
+import { displayEntryE6 } from "@/lib/entry-price-display";
+import { isSentinelValue } from "@/lib/health";
 import { formatPnl } from "@/lib/chart-pnl-format";
 import { adlSideFactor, effectiveExposureQ } from "@/lib/v17-adl";
 
@@ -50,8 +52,35 @@ export const ChartPnlBadge: FC<ChartPnlBadgeProps> = ({ slabAddress }) => {
   // shared by every wallet that traded it in this browser (v17 accountIdx is
   // always 0), so switching wallets showed the previous wallet's entry price.
   const rawEntryPrice = account.entryPrice ?? 0n;
-  const resolvedEntryPrice =
-    rawEntryPrice > 0n ? rawEntryPrice : getEntryPrice(slabAddress, userAccount.idx, account.owner.toBase58());
+  const cachedEntryPrice =
+    rawEntryPrice > 0n
+      ? rawEntryPrice
+      : getEntryPrice(
+          slabAddress,
+          userAccount.idx,
+          account.owner.toBase58(),
+        );
+
+  // Match the shared entry-price display contract: an exact cached Entry or
+  // a PnL-derived Entry may drive displayed PnL, while source==="unknown"
+  // must remain hidden rather than presenting mark-based placeholder PnL.
+  const safePnl =
+    account.pnl != null && !isSentinelValue(account.pnl)
+      ? account.pnl
+      : 0n;
+
+  const resolvedEntry = resolveEntryPrice(
+    account.positionSize,
+    cachedEntryPrice,
+    safePnl,
+    livePriceE6,
+  );
+
+  const resolvedEntryPrice = displayEntryE6(
+    resolvedEntry.entry,
+    resolvedEntry.source,
+  );
+
   if (resolvedEntryPrice <= 0n) return null;
 
   // A deleveraged leg moves at `basis * a_side / a_basis`, not at raw basis —
