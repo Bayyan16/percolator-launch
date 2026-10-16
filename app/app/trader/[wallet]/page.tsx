@@ -12,6 +12,8 @@ import { useMultiTokenMeta } from "@/hooks/useMultiTokenMeta";
 import type { PortfolioPosition } from "@/hooks/usePortfolio";
 import { TradeStatsPanel } from "@/components/trade/TradeStatsPanel";
 import { TradeHistoryTable } from "@/components/trade/TradeHistoryTable";
+import { PnlHistoryCard } from "@/components/dashboard/pnl-history/PnlHistoryCard";
+import { isPortfolioPnlHistoryEnabled } from "@/lib/portfolio-pnl-history-flag";
 import { describeEntryPrice } from "@/lib/entry-price-display";
 import { formatPnl, formatTokenAmount, formatUsdPriceE6, LIQ_PRICE_UNLIQUIDATABLE } from "@/lib/format";
 import { explorerAccountUrl } from "@/lib/config";
@@ -183,6 +185,13 @@ export default function TraderProfilePage() {
           </div>
         )}
       </section>
+
+      {/* Historical realized PnL: unavailable until a verified adapter exists. */}
+      {isPortfolioPnlHistoryEnabled() && (
+        <section className="mt-10">
+          <PnlHistoryCard />
+        </section>
+      )}
 
       {/* ── Trade history ────────────────────────────────────── */}
       <section className="mt-10">
