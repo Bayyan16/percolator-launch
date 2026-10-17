@@ -18,6 +18,16 @@ export type PnlHistoryViewModel =
       days: Readonly<Record<string, PnlHistoryDay>>;
     };
 
+type HistoryRange = "DAILY" | "WEEKLY" | "MONTHLY" | "YEARLY";
+type HistoryRecords = Extract<PnlHistoryViewModel, { kind: "records" }>;
+
+type PeriodResult = {
+  total: number | null;
+  knownDays: number;
+  totalDays: number;
+  hasActivity: boolean;
+};
+
 const SUMMARY: { key: SummaryKey; label: string }[] = [
   { key: "today", label: "Today PnL" },
   { key: "days7", label: "7D PnL" },
@@ -26,6 +36,7 @@ const SUMMARY: { key: SummaryKey; label: string }[] = [
   { key: "lifetime", label: "Lifetime PnL" },
 ];
 const WEEKDAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+const RANGES: readonly HistoryRange[] = ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"];
 
 function usd(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "—";
@@ -49,6 +60,63 @@ function firstMonth(initialMonth?: string): Date {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
 }
 
+function utcDate(year: number, month: number, day: number): Date {
+  return new Date(Date.UTC(year, month, day));
+}
+
+function addDays(date: Date, delta: number): Date {
+  return utcDate(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + delta);
+}
+
+function isoDay(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function monday(date: Date): Date {
+  const offset = (date.getUTCDay() + 6) % 7;
+  return addDays(date, -offset);
+}
+
+function formatUtc(date: Date, options: Intl.DateTimeFormatOptions): string {
+  return new Intl.DateTimeFormat("en-US", { ...options, timeZone: "UTC" }).format(date);
+}
+
+/** Unknown or non-finite day values invalidate the total, rather than silently becoming zero. */
+function aggregate(records: HistoryRecords | null, start: Date, end: Date): PeriodResult {
+  let knownDays = 0;
+  let totalDays = 0;
+  let total = 0;
+  let hasActivity = false;
+  for (let day = start; day.getTime() <= end.getTime(); day = addDays(day, 1)) {
+    totalDays++;
+    const value = records?.days[isoDay(day)];
+    if (!value || (value.kind === "activity" && !Number.isFinite(value.realizedPnlUsd))) continue;
+    knownDays++;
+    if (value.kind === "activity") {
+      hasActivity = true;
+      total += value.realizedPnlUsd;
+    }
+  }
+  return {
+    total: records && knownDays === totalDays && Number.isFinite(total) ? total : null,
+    knownDays,
+    totalDays,
+    hasActivity,
+  };
+}
+
+function periodValue(result: PeriodResult): string {
+  if (result.total === null) return "—";
+  if (!result.hasActivity) return "·";
+  return usd(result.total);
+}
+
+function valueClass(result: PeriodResult): string {
+  return result.total === null || !result.hasActivity
+    ? "text-[var(--text-secondary)]"
+    : pnlColor(result.total);
+}
+
 /**
  * Isolated calendar UI: no wallet hooks, fetch, RPC, mock-mode dependency,
  * price calculations, or writes to existing Portfolio state.
@@ -62,7 +130,8 @@ export function PnlHistoryCard({
   /** YYYY-MM, for deterministic previews/tests; displayed dates are UTC. */
   initialMonth?: string;
 }) {
-  const [month, setMonth] = useState(() => firstMonth(initialMonth));
+  const [cursor, setCursor] = useState(() => firstMonth(initialMonth));
+  const [range, setRange] = useState<HistoryRange>("MONTHLY");
   const records =
     data.kind === "records" &&
     (data.source === "verified" || process.env.NODE_ENV !== "production")
@@ -70,18 +139,57 @@ export function PnlHistoryCard({
       : null;
   const demo = records?.source === "demo";
 
-  const year = month.getUTCFullYear();
-  const monthIndex = month.getUTCMonth();
-  const startOffset = (new Date(Date.UTC(year, monthIndex, 1)).getUTCDay() + 6) % 7;
-  const daysInMonth = new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
-  const cellCount = Math.ceil((startOffset + daysInMonth) / 7) * 7;
-  const monthLabel = new Intl.DateTimeFormat("en-US", {
-    timeZone: "UTC", month: "long", year: "numeric",
-  }).format(month);
+  const year = cursor.getUTCFullYear();
+  const monthIndex = cursor.getUTCMonth();
+  const monthStart = utcDate(year, monthIndex, 1);
+  const monthEnd = utcDate(year, monthIndex + 1, 0);
+  const startOffset = (monthStart.getUTCDay() + 6) % 7;
+  const cellCount = Math.ceil((startOffset + monthEnd.getUTCDate()) / 7) * 7;
+  const monthLabel = formatUtc(monthStart, { month: "long", year: "numeric" });
+  const weekStart = monday(cursor);
+  const weekEnd = addDays(weekStart, 6);
+  const dayLabel = formatUtc(cursor, { month: "long", day: "numeric", year: "numeric" });
+  const weekLabel = `${formatUtc(weekStart, { month: "short", day: "numeric", year: "numeric" })} – ${formatUtc(weekEnd, { month: "short", day: "numeric", year: "numeric" })}`;
+  const periodLabel = range === "DAILY" ? dayLabel : range === "WEEKLY" ? weekLabel : range === "YEARLY" ? String(year) : monthLabel;
+  const period = range === "DAILY" ? "day" : range === "WEEKLY" ? "week" : range === "MONTHLY" ? "month" : "year";
 
-  function moveMonth(delta: number) {
-    setMonth((previous) =>
-      new Date(Date.UTC(previous.getUTCFullYear(), previous.getUTCMonth() + delta, 1)),
+  function movePeriod(delta: number) {
+    setCursor((previous) => {
+      const y = previous.getUTCFullYear();
+      const m = previous.getUTCMonth();
+      if (range === "DAILY") return addDays(previous, delta);
+      if (range === "WEEKLY") return addDays(previous, 7 * delta);
+      if (range === "MONTHLY") return utcDate(y, m + delta, 1);
+      return utcDate(y + delta, m, 1);
+    });
+  }
+
+  function dayCell(date: Date, inMonth: boolean) {
+    const key = isoDay(date);
+    const day = inMonth ? records?.days[key] : undefined;
+    const value = day?.kind === "activity" && Number.isFinite(day.realizedPnlUsd)
+      ? day.realizedPnlUsd
+      : null;
+    const background = value != null && value > 0
+      ? "bg-[var(--long)]/10"
+      : value != null && value < 0
+        ? "bg-[var(--short)]/10"
+        : "bg-[var(--panel-bg)]";
+    return (
+      <button
+        key={key}
+        type="button"
+        data-testid={`pnl-day-${key}`}
+        disabled={!inMonth}
+        onClick={() => { setCursor(date); setRange("DAILY"); }}
+        aria-label={`View ${formatUtc(date, { month: "long", day: "numeric", year: "numeric" })} PnL`}
+        className={`min-w-0 p-2 text-left ${background} ${inMonth ? "hover:outline hover:outline-1 hover:outline-[var(--accent)]" : "opacity-35"}`}
+      >
+        <div className="text-[10px] text-[var(--text-secondary)]">{date.getUTCDate()}</div>
+        <div className={`mt-2 truncate text-[10px] font-semibold tabular-nums ${value == null ? "text-[var(--text-secondary)]" : pnlColor(value)}`}>
+          {!inMonth || !day ? "—" : day.kind === "no-activity" ? "·" : usd(value)}
+        </div>
+      </button>
     );
   }
 
@@ -94,17 +202,16 @@ export function PnlHistoryCard({
             {demo ? "DEMO DATA — not wallet performance" : "Historical realized PnL · UTC"}
           </p>
         </div>
-        <div className="flex max-w-full gap-1 text-[9px]" aria-label="History ranges">
-          {(["DAILY", "WEEKLY", "MONTHLY", "YEARLY"] as const).map((range) => (
+        <div className="flex max-w-full flex-wrap gap-1 text-[10px]" aria-label="History ranges">
+          {RANGES.map((option) => (
             <button
-              key={range}
+              key={option}
               type="button"
-              disabled={range !== "MONTHLY"}
-              aria-current={range === "MONTHLY" ? "true" : undefined}
-              title={range !== "MONTHLY" ? "Not implemented in this phase" : undefined}
-              className={`rounded-sm border border-[var(--border)] px-2 py-1.5 ${range === "MONTHLY" ? "bg-[var(--accent)]/15 text-[var(--accent)]" : "cursor-not-allowed text-[var(--text-secondary)] opacity-50"}`}
+              onClick={() => setRange(option)}
+              aria-pressed={range === option}
+              className={`rounded-sm border border-[var(--border)] px-2 py-1.5 ${range === option ? "bg-[var(--accent)]/15 text-[var(--accent)]" : "text-[var(--text-secondary)] hover:text-[var(--text)]"}`}
             >
-              {range}
+              {option}
             </button>
           ))}
         </div>
@@ -135,37 +242,98 @@ export function PnlHistoryCard({
         })}
       </div>
 
-      <div className="flex items-center justify-between gap-2 border-b border-[var(--border)] px-3 py-2">
-        <div className="flex items-center gap-2">
-          <button type="button" aria-label="Previous month" onClick={() => moveMonth(-1)} className="border border-[var(--border)] px-2 py-1 text-[var(--text-secondary)]">‹</button>
-          <h3 className="text-xs font-semibold uppercase text-[var(--text)]">{monthLabel}</h3>
-          <button type="button" aria-label="Next month" onClick={() => moveMonth(1)} className="border border-[var(--border)] px-2 py-1 text-[var(--text-secondary)]">›</button>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] px-3 py-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <button type="button" aria-label={`Previous ${period}`} onClick={() => movePeriod(-1)} className="border border-[var(--border)] px-2 py-1 text-[var(--text-secondary)]">‹</button>
+          <h3 className="min-w-0 text-xs font-semibold uppercase text-[var(--text)]">{periodLabel}</h3>
+          <button type="button" aria-label={`Next ${period}`} onClick={() => movePeriod(1)} className="border border-[var(--border)] px-2 py-1 text-[var(--text-secondary)]">›</button>
         </div>
-        <span className="text-[9px] uppercase tracking-wider text-[var(--text-secondary)]">Monthly · UTC</span>
+        <span className="text-[9px] uppercase tracking-wider text-[var(--text-secondary)]">{range[0] + range.slice(1).toLowerCase()} · UTC</span>
       </div>
-      <div className="grid grid-cols-7 border-b border-[var(--border)]">
-        {WEEKDAYS.map((day) => (
-          <div key={day} className="min-w-0 py-2 text-center text-[9px] text-[var(--text-secondary)]">{day}</div>
-        ))}
-      </div>
-      <div className="grid grid-cols-7 gap-px bg-[var(--border)]" aria-label={`${monthLabel} calendar`}>
-        {Array.from({ length: cellCount }, (_, index) => {
-          const date = new Date(Date.UTC(year, monthIndex, 1 + index - startOffset));
-          const inMonth = date.getUTCMonth() === monthIndex && date.getUTCFullYear() === year;
-          const key = date.toISOString().slice(0, 10);
-          const day = inMonth ? records?.days[key] : undefined;
-          const value = day?.kind === "activity" ? day.realizedPnlUsd : null;
-          const background = value != null && value > 0 ? "bg-[var(--long)]/10" : value != null && value < 0 ? "bg-[var(--short)]/10" : "bg-[var(--panel-bg)]";
-          return (
-            <div key={key} data-testid={`pnl-day-${key}`} className={`min-w-0 p-1.5 sm:p-2 ${background} ${inMonth ? "" : "opacity-35"}`}>
-              <div className="text-[9px] text-[var(--text-secondary)]">{date.getUTCDate()}</div>
-              <div className={`mt-2 truncate text-[9px] font-semibold tabular-nums ${value == null ? "text-[var(--text-secondary)]" : pnlColor(value)}`}>
-                {!inMonth || !day ? "—" : day.kind === "no-activity" ? "·" : usd(value)}
+
+      {range === "DAILY" && (() => {
+        const result = aggregate(records, cursor, cursor);
+        return (
+          <div className="p-4" aria-label="Daily PnL detail">
+            <p className="text-xs text-[var(--text-secondary)]">Realized PnL · {dayLabel}</p>
+            <div className={`mt-2 text-xl font-bold tabular-nums ${valueClass(result)}`}>{periodValue(result)}</div>
+            <p className="mt-2 text-xs text-[var(--text-secondary)]">
+              {result.total === null ? "Unavailable — no verified day record." : result.hasActivity ? "Confirmed activity" : "Confirmed no activity"}
+            </p>
+          </div>
+        );
+      })()}
+
+      {range === "WEEKLY" && (() => {
+        const result = aggregate(records, weekStart, weekEnd);
+        return (
+          <div aria-label="Weekly PnL detail">
+            <div className="border-b border-[var(--border)] px-4 py-3">
+              <p className="text-xs text-[var(--text-secondary)]">Week total · {result.knownDays}/{result.totalDays} verified days</p>
+              <div className={`mt-1 text-lg font-bold tabular-nums ${valueClass(result)}`}>{periodValue(result)}</div>
+              {result.total === null && <p className="mt-1 text-xs text-[var(--text-secondary)]">Incomplete period — total unavailable.</p>}
+            </div>
+            <div className="grid grid-cols-1 gap-px bg-[var(--border)] sm:grid-cols-7">
+              {Array.from({ length: 7 }, (_, index) => {
+                const date = addDays(weekStart, index);
+                const resultDay = aggregate(records, date, date);
+                return (
+                  <div key={isoDay(date)} data-testid={`pnl-week-day-${isoDay(date)}`} className="min-w-0 bg-[var(--panel-bg)] p-3">
+                    <p className="text-[10px] text-[var(--text-secondary)]">{WEEKDAYS[index]} · {formatUtc(date, { month: "short", day: "numeric" })}</p>
+                    <p className={`mt-2 text-xs font-semibold tabular-nums ${valueClass(resultDay)}`}>{periodValue(resultDay)}</p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+
+      {range === "MONTHLY" && (
+        <div>
+          <p className="px-3 py-2 text-[10px] text-[var(--text-secondary)] sm:hidden">Swipe horizontally to view the calendar.</p>
+          <div className="overflow-x-auto" aria-label="Monthly calendar scroll area">
+            <div className="min-w-[560px] sm:min-w-0">
+              <div className="grid grid-cols-7 border-b border-[var(--border)]">
+                {WEEKDAYS.map((day) => (
+                  <div key={day} className="min-w-0 py-2 text-center text-[9px] text-[var(--text-secondary)]">{day}</div>
+                ))}
+              </div>
+              <div className="grid grid-cols-7 gap-px bg-[var(--border)]" aria-label={`${monthLabel} calendar`}>
+                {Array.from({ length: cellCount }, (_, index) => {
+                  const date = utcDate(year, monthIndex, 1 + index - startOffset);
+                  return dayCell(date, date.getUTCMonth() === monthIndex && date.getUTCFullYear() === year);
+                })}
               </div>
             </div>
-          );
-        })}
-      </div>
+          </div>
+        </div>
+      )}
+
+      {range === "YEARLY" && (
+        <div className="grid grid-cols-2 gap-px bg-[var(--border)] sm:grid-cols-3 lg:grid-cols-4" aria-label={`${year} yearly calendar`}>
+          {Array.from({ length: 12 }, (_, index) => {
+            const first = utcDate(year, index, 1);
+            const last = utcDate(year, index + 1, 0);
+            const result = aggregate(records, first, last);
+            return (
+              <button
+                type="button"
+                key={index}
+                data-testid={`pnl-year-month-${year}-${String(index + 1).padStart(2, "0")}`}
+                onClick={() => { setCursor(first); setRange("MONTHLY"); }}
+                aria-label={`View ${formatUtc(first, { month: "long", year: "numeric" })} calendar`}
+                className="min-w-0 bg-[var(--panel-bg)] p-3 text-left hover:outline hover:outline-1 hover:outline-[var(--accent)]"
+              >
+                <p className="text-[10px] uppercase text-[var(--text-secondary)]">{formatUtc(first, { month: "long" })}</p>
+                <p className={`mt-2 text-sm font-semibold tabular-nums ${valueClass(result)}`}>{periodValue(result)}</p>
+                <p className="mt-2 text-[10px] text-[var(--text-secondary)]">{result.knownDays}/{result.totalDays} verified days</p>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <footer className="px-3 py-2 text-[9px] text-[var(--text-secondary)]">
         Green: profit · Red: loss · Dot: confirmed no activity · —: unavailable
       </footer>
