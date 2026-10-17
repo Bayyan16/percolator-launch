@@ -346,7 +346,7 @@ export default function DashboardPage() {
           {/* Row 1: PnL Chart + Position Summary */}
           <ScrollReveal delay={0.1}>
             <div className="mb-4 grid gap-4 lg:grid-cols-5">
-              <div className="lg:col-span-3" style={{ minHeight: 380, maxHeight: 500 }}>
+              <div className="lg:col-span-3" style={{ minHeight: 380 }}>
                 <PortfolioPnLHistorySwitcher />
               </div>
               <div className="lg:col-span-2" style={{ minHeight: 380, maxHeight: 500 }}>

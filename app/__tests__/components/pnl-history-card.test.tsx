@@ -30,6 +30,24 @@ const verified = (days: Extract<PnlHistoryViewModel, { kind: "records" }>["days"
 });
 
 describe("isolated PnL History Card", () => {
+  it("starts unseeded DAILY and WEEKLY at the current UTC day", () => {
+    vi.useFakeTimers();
+
+    try {
+      vi.setSystemTime(new Date("2026-10-17T12:00:00Z"));
+
+      render(<PnlHistoryCard />);
+
+      fireEvent.click(screen.getByRole("button", { name: "DAILY" }));
+      expect(screen.getByText("October 17, 2026")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "WEEKLY" }));
+      expect(screen.getByText("Oct 12, 2026 – Oct 18, 2026")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("fails closed: missing history is unavailable, never $0 or no activity", () => {
     render(<PnlHistoryCard initialMonth="2026-10" />);
     expect(screen.getByRole("status")).toHaveTextContent(/History unavailable/);

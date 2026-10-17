@@ -23,6 +23,16 @@ const switcher = file.statements.find(
 );
 
 describe("Portfolio PnL History switcher gate", () => {
+  it("does not cap the desktop history wrapper height", () => {
+    const wrapper = code.match(
+      /<div className="lg:col-span-3"\s+style=\{\{([^}]*)\}\}>\s*<PortfolioPnLHistorySwitcher\s*\/>/
+    );
+
+    expect(wrapper).not.toBeNull();
+    expect(wrapper?.[1]).toContain("minHeight: 380");
+    expect(wrapper?.[1]).not.toContain("maxHeight");
+  });
+
   it("preserves the live chart when the flag is disabled", () => {
     if (!switcher || !ts.isFunctionDeclaration(switcher) || !switcher.body) {
       throw new Error("PnL switcher function missing");

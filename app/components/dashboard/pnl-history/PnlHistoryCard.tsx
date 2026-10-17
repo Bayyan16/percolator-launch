@@ -53,11 +53,12 @@ function pnlColor(value: number): string {
   return "text-[var(--text-secondary)]";
 }
 
-function firstMonth(initialMonth?: string): Date {
+/** Preserve today's UTC day unless an explicit preview month is supplied. */
+function initialCursor(initialMonth?: string): Date {
   const match = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(initialMonth ?? "");
   if (match) return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, 1));
   const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 }
 
 function utcDate(year: number, month: number, day: number): Date {
@@ -130,7 +131,7 @@ export function PnlHistoryCard({
   /** YYYY-MM, for deterministic previews/tests; displayed dates are UTC. */
   initialMonth?: string;
 }) {
-  const [cursor, setCursor] = useState(() => firstMonth(initialMonth));
+  const [cursor, setCursor] = useState(() => initialCursor(initialMonth));
   const [range, setRange] = useState<HistoryRange>("MONTHLY");
   const records =
     data.kind === "records" &&
