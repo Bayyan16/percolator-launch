@@ -1,4 +1,4 @@
-import { cleanup, configure } from '@testing-library/react';
+import { cleanup } from '@testing-library/react';
 import { afterEach, vi } from 'vitest';
 import '@testing-library/jest-dom';
 
@@ -100,21 +100,6 @@ for (const name of ["localStorage", "sessionStorage"] as const) {
   // over, so mirror onto globalThis too (and in node this is the only target).
   Object.defineProperty(globalThis, name, { value: impl, writable: true, configurable: true });
 }
-
-// ── Async-utility budget ──────────────────────────────────────────────────────
-//
-// Testing Library's waitFor / findBy* default to 1000 ms of WALL CLOCK. With 979 test
-// files across every core, a file that waits on two React state transitions can exceed
-// that budget on a loaded machine while being nowhere near broken: the five Privy bridge
-// suites passed on their own and on `--no-file-parallelism`, and failed a varying 1-5 of
-// their assertions in the parallel full run (9 failures in one run, 11 in the next). CI
-// never showed it because `retry: 3` (vitest.config.ts) passes them on a later attempt.
-//
-// A budget is not a wait: waitFor still resolves on the first successful poll, so a
-// passing test is no slower. 5 s is comfortably under the 10 s testTimeout, so a test
-// that is genuinely stuck still fails with its own assertion error rather than a
-// bare test timeout.
-configure({ asyncUtilTimeout: 5000 });
 
 // Cleanup after each test
 afterEach(() => {
