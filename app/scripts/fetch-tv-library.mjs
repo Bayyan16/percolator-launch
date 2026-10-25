@@ -158,8 +158,10 @@ export function installRuntime(srcLibDir, destDir, lock) {
  * both accept. On Linux and macOS this is byte-identical to passing the paths directly.
  */
 const slashes = (p) => p.split(path.sep).join("/");
-function tar(args, { archive, cwd }) {
-  execFileSync("tar", [...args, "-f", path.basename(archive)], {
+function tar(mode, args, { archive, cwd }) {
+  // `-<mode>zf NAME` first, then the rest: bsdtar (macOS) reads an option after a member name as a
+  // member, so `-f` must not trail a create's member list; this is the original argv shape.
+  execFileSync("tar", [`-${mode}zf`, path.basename(archive), ...args], {
     cwd: cwd ?? path.dirname(archive),
     stdio: "ignore",
   });
@@ -253,7 +255,7 @@ export async function main(env = process.env, deps = {}) {
           throw new DigestMismatch(`blob tarball sha256 mismatch: expected ${lock.blob.tarballSha256}, got ${got}. Refusing to install.`);
         }
         writeFileSync(tarball, buf);
-        tar(["-xz", "-C", slashes(extract)], { archive: tarball });
+        tar("x", ["-C", slashes(extract)], { archive: tarball });
         libDir = path.join(extract, "charting_library");
         if (!existsSync(libDir)) throw new Error("blob archive has no charting_library/ folder");
         const digest = treeDigest(libDir);
@@ -275,7 +277,7 @@ export async function main(env = process.env, deps = {}) {
       if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error("TV_LIBRARY_REPO must look like owner/name");
       log(`downloading ${repo}@${lock.commit.slice(0, 12)} (${lock.tag})…`);
       await (deps.download ?? download)(repo, lock.commit, ghToken, tarball);
-      tar(["-xz", "-C", slashes(extract)], { archive: tarball });
+      tar("x", ["-C", slashes(extract)], { archive: tarball });
       libDir = path.join(archiveRoot(extract), "charting_library");
       if (!existsSync(libDir)) throw new Error("archive has no charting_library/ folder");
       const digest = treeDigest(libDir);

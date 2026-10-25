@@ -180,7 +180,7 @@ describe("Vercel Blob distribution (main)", () => {
     // -f takes a BARE NAME against cwd and -C is forward-slashed, for the same reason the
     // script itself does (scripts/fetch-tv-library.mjs): GNU tar on Windows reads the "C:" of
     // an absolute path as a remote host and mangles backslashes in -C.
-    execFileSync("tar", ["-cz", "-C", path.join(root, "pkg").split(path.sep).join("/"), "charting_library", "-f", path.basename(tgz)], {
+    execFileSync("tar", ["-czf", path.basename(tgz), "-C", path.join(root, "pkg").split(path.sep).join("/"), "charting_library"], {
       cwd: path.dirname(tgz),
     });
     const buf = readFileSync(tgz);
