@@ -4,7 +4,7 @@ import { stakePoolsUrl } from "@/lib/stake-pools-url";
 import { STAKE_COPY, cooldownDuration } from "@/lib/stake-copy";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { useStakeCooldown } from "@/hooks/useStakeCooldown";
-import { useEffect, useId, useState, useCallback, useSyncExternalStore, type CSSProperties } from "react";
+import { useEffect, useId, useState, useRef, useCallback, useSyncExternalStore, type CSSProperties } from "react";
 import { DEVNET_PROGRAM_IDS } from "@/lib/program-ids";
 import { useWalletCompat, useConnectionCompat } from "@/hooks/useWalletCompat";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
@@ -717,6 +717,7 @@ function DepositWidget({
   setSelectedPool,
   mode,
   setMode,
+  positionRefreshKey,
 }: {
   pools: StakePool[];
   onTxSuccess?: () => void;
@@ -728,6 +729,7 @@ function DepositWidget({
   setSelectedPool: (poolId: string) => void;
   mode: "deposit" | "withdraw";
   setMode: (mode: "deposit" | "withdraw") => void;
+  positionRefreshKey: number;
 }) {
   const { connected, publicKey } = useWalletCompat();
   const { connection } = useConnectionCompat();
@@ -750,6 +752,7 @@ function DepositWidget({
   // The key whose balance could not be read (#2706): unknown, not "no balance".
   const [withdrawErrorKey, setWithdrawErrorKey] = useState<string | null>(null);
   const [withdrawReading, setWithdrawReading] = useState(false);
+  const withdrawReadKeyRef = useRef<string | null>(null);
   const withdrawPosition = withdrawRead !== null && withdrawRead.key === withdrawKey ? withdrawRead.position : null;
   const withdrawPositionError = withdrawKey !== null && withdrawErrorKey === withdrawKey;
   // Loading while a read runs, and for a selected pair that hasn't been read yet.
@@ -846,6 +849,7 @@ function DepositWidget({
   // currently-selected pool instead of scanning all pools for the first match.
   useEffect(() => {
     if (!connected || !publicKey || !pool?.slabAddress) {
+      withdrawReadKeyRef.current = null;
       setWithdrawRead(null);
       setWithdrawReading(false);
       setWithdrawErrorKey(null);
@@ -853,7 +857,8 @@ function DepositWidget({
     }
     let cancelled = false;
     const readKey = `${publicKey.toBase58()}:${pool.slabAddress}`;
-    setWithdrawReading(true);
+    // A re-read of a pair already on screen (the 30 s recovery refresh) is silent: no "Checking…" flash.
+    if (withdrawReadKeyRef.current !== readKey) setWithdrawReading(true);
     setWithdrawErrorKey(null);
     (async () => {
       try {
@@ -864,12 +869,16 @@ function DepositWidget({
           ?? DEVNET_PROGRAM_IDS.stake
         );
         const found = await fetchPoolPosition(pool, publicKey, connection, stakeProgramId);
-        if (!cancelled) setWithdrawRead({ key: readKey, position: found });
+        if (!cancelled) {
+          withdrawReadKeyRef.current = readKey;
+          setWithdrawRead({ key: readKey, position: found });
+        }
       } catch (err) {
         // fetchPoolPosition throws only when the pool could not be read; a confirmed
         // "no position" resolves to null. So this is unknown, not empty.
         console.error("[DepositWidget] Failed to fetch withdraw position:", err);
         if (!cancelled) {
+          withdrawReadKeyRef.current = null;
           setWithdrawRead(null);
           setWithdrawErrorKey(readKey);
         }
@@ -878,7 +887,7 @@ function DepositWidget({
       }
     })();
     return () => { cancelled = true; };
-  }, [connected, publicKey, pool, connection, withdrawRefreshKey]);
+  }, [connected, publicKey, pool, connection, withdrawRefreshKey, positionRefreshKey]);
 
   // Human-readable balance (null = unknown / not fetched)
   const walletBalance: number | null = walletBalanceRaw !== null
@@ -1777,6 +1786,27 @@ export default function StakePage() {
     return () => { cancelled = true; };
   }, [connected, publicKey, pools, connection, positionRefreshKey]);
 
+  // A keeper can return insurance to the vault well after a withdrawal's
+  // confirmation and the one 2-second follow-up. Keep the withdrawable amount
+  // current while a first-loss position is open, including when the units read
+  // temporarily failed. Only the on-chain position scan needs refreshing.
+  const hasFirstLossPosition = isDevnetV22Enabled() && pools.some((pool) =>
+    pool.stakeKind === "first-loss" && (positions.some((position) => position.poolId === pool.id) || positionsUnreadable > 0),
+  );
+  useEffect(() => {
+    if (!connected || !hasFirstLossPosition) return;
+    const refresh = () => {
+      if (document.visibilityState === "visible") setPositionRefreshKey((key) => key + 1);
+    };
+    const refreshOnReturn = () => refresh();
+    const timer = window.setInterval(refresh, 30_000);
+    document.addEventListener("visibilitychange", refreshOnReturn);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshOnReturn);
+    };
+  }, [connected, hasFirstLossPosition]);
+
   const handleTxSuccess = useCallback(() => {
     // Re-fetch both the user's LP position and pool-level TVL/cap data after
     // deposit/withdraw. Without refreshing pools, successful deposits can leave
@@ -1873,6 +1903,7 @@ export default function StakePage() {
                 setSelectedPool={setSelectedPool}
                 mode={widgetMode}
                 setMode={setWidgetMode}
+                positionRefreshKey={positionRefreshKey}
               />
             </ErrorBoundary>
             <ErrorBoundary label="Your Positions">
