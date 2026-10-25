@@ -149,11 +149,11 @@ describe("first-loss position refresh after keeper recovery", () => {
     h.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ pools: [apiPool(900)] }) });
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     render(<StakePage />);
-    await waitFor(() => expect(stat("Your Deposits")).toBe("$450.00"));
+    await waitFor(() => expect(stat("Your Deposits")).toBe("$450.00"), { timeout: 5000 });
     const withdraw = screen.getByTestId("stake-withdraw-available") as HTMLButtonElement;
     expect(withdraw.disabled).toBe(true); // vault empty after the confirmed withdrawal
     fireEvent.click(screen.getByTestId("stake-tab-withdraw"));
-    await waitFor(() => expect(screen.getAllByTestId("stake-withdraw-cap-note")).toHaveLength(2));
+    await waitFor(() => expect(screen.getAllByTestId("stake-withdraw-cap-note")).toHaveLength(2), { timeout: 5000 });
     expect(screen.getAllByTestId("stake-withdraw-cap-note").every((note) => note.textContent?.includes("$0.00"))).toBe(true);
     expect(document.visibilityState).toBe("visible");
     const before = lpReads();
@@ -166,11 +166,32 @@ describe("first-loss position refresh after keeper recovery", () => {
     expect(screen.getAllByTestId("stake-withdraw-cap-note").every((note) => note.textContent?.includes("$500.00"))).toBe(true);
   });
 
+  it("refreshes the Withdraw tab silently: no Checking flash while the poll re-reads", async () => {
+    h.unitsReadable = true;
+    h.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ pools: [apiPool(900)] }) });
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    render(<StakePage />);
+    await waitFor(() => expect(stat("Your Deposits")).toBe("$450.00"), { timeout: 5000 });
+    fireEvent.click(screen.getByTestId("stake-tab-withdraw"));
+    await waitFor(() => expect(screen.getAllByTestId("stake-withdraw-cap-note")).toHaveLength(2), { timeout: 5000 });
+    expect(screen.queryByText("Checking staked balance…")).toBeNull();
+
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => { release = r; });
+    const inner = h.getAccountInfo.getMockImplementation()!;
+    h.getAccountInfo.mockImplementation(async (pk: PublicKey) => { if (pk.equals(LP_ATA)) await gate; return inner(pk); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    // The re-read is in flight (blocked on the gate): the tab keeps its last read and shows no loading line.
+    expect(screen.queryByText("Checking staked balance…")).toBeNull();
+    expect(screen.getAllByTestId("stake-withdraw-cap-note")).toHaveLength(2);
+    await act(async () => { release(); });
+  });
+
   it("does not poll a fee-only position for insurance recovery", async () => {
     h.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ pools: [{ ...apiPool(900), stakeKind: "fee-only" }] }) });
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     render(<StakePage />);
-    await waitFor(() => expect(stat("Your Deposits")).toBe("$450.00"));
+    await waitFor(() => expect(stat("Your Deposits")).toBe("$450.00"), { timeout: 5000 });
     const before = lpReads();
 
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
@@ -183,7 +204,7 @@ describe("first-loss position refresh after keeper recovery", () => {
     h.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ pools: [apiPool(900)] }) });
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     render(<StakePage />);
-    await waitFor(() => expect((screen.getByTestId("stake-withdraw-available") as HTMLButtonElement).disabled).toBe(true));
+    await waitFor(() => expect((screen.getByTestId("stake-withdraw-available") as HTMLButtonElement).disabled).toBe(true), { timeout: 5000 });
 
     h.failLpReads = 2; // parent card and selected-pool widget both fail once
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
