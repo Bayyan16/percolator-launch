@@ -327,25 +327,26 @@ export class UpstreamPool {
 
   /** A fallback may serve only if it is on the deployment's cluster (genesis hash, cached; one probe at a time per upstream). */
   private clusterOk(u: UpstreamSpec, network: RpcNetwork, budgetMs: number): Promise<boolean> {
-    const c = this.cluster.get(u.id);
+    const clusterKey = `${network}:${u.id}`;
+    const c = this.cluster.get(clusterKey);
     if (c && (c.ok || c.until > this.now())) return Promise.resolve(c.ok);
-    const running = this.probing.get(u.id);
+    const running = this.probing.get(clusterKey);
     if (running) return running;
     const p = (async () => {
       try {
         const r = (await this.attempt(u, { jsonrpc: "2.0", id: 1, method: "getGenesisHash", params: [] }, budgetMs)).json as { result?: unknown };
         const ok = typeof r?.result === "string" && r.result === CLUSTER_GENESIS[network];
-        this.cluster.set(u.id, { ok, until: ok ? Infinity : this.now() + this.recheck });
+        this.cluster.set(clusterKey, { ok, until: ok ? Infinity : this.now() + this.recheck });
         if (!ok) this.warn(`[rpc-upstreams] a ${network} fallback answered from a different cluster: ignored`);
         return ok;
       } catch (e) {
         if (e instanceof UpstreamFailure) this.markFail(u, { ambiguous: e.ambiguous }); // could not tell: not cached, tried again later
         return false;
       } finally {
-        this.probing.delete(u.id);
+        this.probing.delete(clusterKey);
       }
     })();
-    this.probing.set(u.id, p);
+    this.probing.set(clusterKey, p);
     return p;
   }
 
