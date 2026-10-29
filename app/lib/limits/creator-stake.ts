@@ -9,7 +9,7 @@
  */
 import { juniorFloorAtoms, juniorWithdrawableAtoms, trancheSplit } from "./vault-tranche";
 
-export type StakeReason = "lp-open" | "at-floor" | "backing-short" | "draw-pending";
+export type StakeReason = "lp-open" | "at-floor" | "backing-short" | "draw-pending" | "locked";
 
 export interface CreatorStakeState {
   /** Junior value (vault value minus the Earn claim, floored at 0); null while unknown. */
@@ -52,9 +52,22 @@ export function creatorStakeState(i: {
   return { ...base, stakeValue, withdrawable, reason };
 }
 
-/** A 75 (VaultLpJuniorWithdrawRefused) refusal: the reason the current state explains, else the floor. */
+/**
+ * A 75 (VaultLpJuniorWithdrawRefused) refusal: the reason the current state explains, else a
+ * NEUTRAL line.
+ *
+ * GH#3680: this used to fall back to "at-floor", which asserts something specific and often
+ * false -- "This is the minimum you must keep while Earn deposits are in the vault" -- for a
+ * refusal the state did not explain. Tag 97 has more refusal causes than this module models,
+ * and RC2 adds another (AUD-S1-15: the junior is held to the market's OPEN-INTEREST lock, which
+ * fires when the vault LP is FLAT -- precisely when `lp-open` is not selected). A creator in
+ * that state was told the floor was the reason when it was not.
+ *
+ * The four modelled reasons are unchanged. Only the fallback moves, from a specific claim to one
+ * that is true whatever refused: the withdrawal is locked right now, and that can change.
+ */
 export function stakeReasonFromRefusal(s: CreatorStakeState): StakeReason {
-  return s.reason ?? "at-floor";
+  return s.reason ?? "locked";
 }
 
 /** Clamp a typed amount to what can be withdrawn now. */
@@ -77,6 +90,9 @@ export const CREATOR_STAKE_PANEL_COPY = {
     "at-floor": "This is the minimum you must keep while Earn deposits are in the vault.",
     "backing-short": "Locked until the market's backing covers Earn deposits again.",
     "draw-pending": "Paused while the market settles a loss. It reopens when that is done.",
+    // GH#3680: the fallback for a refusal this module does not model. Says only what is true
+    // of every cause, and never names one that may not apply.
+    locked: "Locked right now. This can change as positions close and the market settles — try again shortly.",
   } satisfies Record<StakeReason, string>,
   resolvedAvailable: (amount: string) => `Your creator stake: ${amount} available after Earn depositors are paid.`,
   resolvedWithdraw: (amount: string) => `Withdraw ${amount}`,
