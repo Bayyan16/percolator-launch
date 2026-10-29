@@ -11,6 +11,7 @@
 import type { MessageContext, StatusVariant, UserMessage } from "@/lib/limits/user-message";
 import { STAKE_ERRORS_V5 } from "./sdk";
 import { STAKE_ERR_DEPOSIT_BELOW_MIN_LIQUIDITY, STAKE_ERR_V5, WRAPPER_ERR_V22 } from "./wrapper-errors";
+import { LEV_GUARD_COPY, LEV_GUARD_REFUSED_TITLE, levGuardRefusedCopy, parseLevGuardRefusal } from "./lev-guard-copy";
 import { catchUpAvailableLine } from "@/lib/limits/catchup-estimate";
 import { V22_COPY, V22_DEPTH_INPUT_COPY, V22_DEPTH_SOURCE_COPY, V22_TIER_CONFIG_COPY } from "./copy";
 import { V22_COUNTERPARTY_CAP_COPY, V22_CUSTOM9_OFF_TICKET, V22_SIDE_FULL_COPY, positionCapCopy } from "./trade-refusal-9-copy";
@@ -20,12 +21,20 @@ import { WRAPPER_ERR_V21 } from "@/lib/v21/wrapper-errors";
 /** percolator-stake error.rs: TrancheNotEnabled = 19, WrongTranche = 21. */
 export const STAKE_ERR_TRANCHE_NOT_ENABLED = 19;
 export const STAKE_ERR_WRONG_TRANCHE = 21;
+/**
+ * Product review 2026-10-28 (S-5 / S-6 / S-12): three pre-v5 stake codes (percolator-stake src/error.rs) that the stake page can hit
+ * and that fell through to "Something went wrong": the withdraw cooldown, a deposit into a pool whose market is resolved, and a deposit
+ * over the pool's cap (devnet freezes a pool with `deposit_cap = 1` once a resolve is decided: stake #318 / L5 M-3).
+ */
+export const STAKE_ERR_COOLDOWN_NOT_ELAPSED = 3;
+export const STAKE_ERR_MARKET_RESOLVED = 8;
+export const STAKE_ERR_DEPOSIT_CAP_EXCEEDED = 9;
 /** percolator-stake error.rs: 29 = AccrueFees refused because only the dead-share floor is staked (no real holders yet). */
 export const STAKE_ERR_NO_REAL_HOLDERS = 29;
 
 type Build = (kind: string, variant: StatusVariant, title: string, body: string, extra?: Partial<UserMessage>) => UserMessage;
 
-export function v22WrapperMessage(code: number, ctx: MessageContext & { minPositionLabel?: string }, m: Build): UserMessage | null {
+export function v22WrapperMessage(code: number, ctx: MessageContext & { minPositionLabel?: string; levGuardLogs?: readonly string[] }, m: Build): UserMessage | null {
   const V = WRAPPER_ERR_V22;
   // A bare 9 off the trade ticket. ON the ticket it stays unmapped on purpose: the ticket then reads chain state to name the cause.
   if (code === WRAPPER_ERR.InvalidInstruction && ctx.surface !== "trade") {
@@ -91,6 +100,21 @@ export function v22WrapperMessage(code: number, ctx: MessageContext & { minPosit
       return m("depth-source", "info", "Try again", V22_DEPTH_SOURCE_COPY);
     case V.GrowthTierConfigInvalid:
       return m("tier-config", "error", "Check the leverage tiers", V22_TIER_CONFIG_COPY);
+    // Leverage guard (tag 124). 133 names its cause from the `lev_guard_refused <why>` log line when the error carries logs.
+    case V.CreatorStakeBelowMinimum:
+      return m("lev-guard-creator-stake", "error", "Creator stake too low", LEV_GUARD_COPY.creatorStake);
+    case V.LevGuardRequired:
+      return m("lev-guard-required", "error", "Page out of date", LEV_GUARD_COPY.required, { action: { id: "refresh", label: "Refresh" } });
+    case V.LevGuardRefused: {
+      const reason = parseLevGuardRefusal(ctx.levGuardLogs);
+      // A young token and an LP round are waits, not mistakes; the others ask the trader to change the order.
+      const variant = reason === "age_under_6h" || reason === "lp_stop_round" ? "wait" : reason === null ? "paused" : "error";
+      return m(`lev-guard-${reason ?? "refused"}`, variant, LEV_GUARD_REFUSED_TITLE[reason ?? "unknown"], levGuardRefusedCopy(reason));
+    }
+    case V.LevGuardInvalid:
+      return m("lev-guard-invalid", "error", "Page out of date", LEV_GUARD_COPY.invalid, { action: { id: "refresh", label: "Refresh" } });
+    case V.LpStopNotTriggered:
+      return m("lp-stop-not-triggered", "info", "Nothing to do", LEV_GUARD_COPY.lpStopNotTriggered);
     // Plain lines for three wrapper codes that used to fall to "Something went wrong" (28, 29) or the engine-speak of the
     // pre-v2.2 table (93).
     case WRAPPER_ERR.OracleConfTooWide:
@@ -112,6 +136,15 @@ export function v22StakeMessage(code: number, m: Build): UserMessage | null {
   }
   if (code === STAKE_ERR_WRONG_TRANCHE) {
     return m("stake-wrong-tier", "info", "Other tier in use", "This wallet already has a deposit in the other tier of this pool. Use that tier, or another wallet. Nothing was sent.");
+  }
+  if (code === STAKE_ERR_COOLDOWN_NOT_ELAPSED) {
+    return m("stake-cooldown", "wait", "Still cooling down", "This stake's cooldown hasn't ended yet. Each new deposit restarts it for the whole position. Try again after it ends. Nothing was sent.");
+  }
+  if (code === STAKE_ERR_MARKET_RESOLVED) {
+    return m("stake-market-settled", "info", "Market settled", "This market has settled, so its pool takes no new deposits. You can still withdraw. Nothing was sent.");
+  }
+  if (code === STAKE_ERR_DEPOSIT_CAP_EXCEEDED) {
+    return m("stake-cap", "info", "Deposits closed", "This pool isn't taking that much right now: it's at its deposit limit, or deposits are closed while the market is being settled. Try a smaller amount, or another pool. Nothing was sent.");
   }
   const info = STAKE_ERRORS_V5[code];
   if (!info) return null;

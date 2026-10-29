@@ -6,8 +6,10 @@
  * deposit of the vault bound to the right-hand rail; every other row was "—" whatever the wallet
  * held. This reads the wallet's LP ATA + pending-redemption escrow for all vaults in one batch
  * and values them like the rail (useInsuranceLP): the program's combined NAV over registry shares
- * on a two-pot vault (lib/limits/earn-split-pot.ts), else (legacy or bound registry) registry
- * shares + distributed fees. A two-pot vault that can't be read or priced is null (unknown).
+ * on a two-pot vault (lib/limits/earn-split-pot.ts); on a BOUND vault the withdraw (tag 77) senior
+ * value over registry shares (lib/limits/earn-bound-pricing.ts, app bug 2026-10-29: losses show);
+ * else (legacy registry) registry shares + distributed fees. A two-pot or bound vault that can't be
+ * read or priced is null (unknown).
  */
 import { parseLpVaultRegistry, parseLpRedemption } from "@/lib/v22/records";
 import { PublicKey, type Connection } from "@solana/web3.js";
@@ -15,6 +17,8 @@ import { getAssociatedTokenAddressSync, unpackAccount } from "@solana/spl-token"
 import { deriveInsuranceLpMint, deriveLpRedemption, deriveLpVaultRegistry } from "@percolatorct/sdk";
 import { readSplitPotState, vaultValue } from "./earn-split-pot";
 import { decodeLpVaultRegistryBound } from "./decode";
+import { readBoundVaultPricings } from "./earn-bound-pricing";
+import { previewWithdrawAtoms } from "./earn-withdraw";
 
 export interface EarnPosition {
   /** LP shares in the wallet + shares escrowed in a pending withdrawal. */
@@ -47,6 +51,7 @@ export async function readEarnPositions(
   const infos: (Awaited<ReturnType<Connection["getAccountInfo"]>>)[] = [];
   for (let i = 0; i < keys.length; i += 99) infos.push(...(await connection.getMultipleAccountsInfo(keys.slice(i, i + 99), "confirmed")));
 
+  const boundHeld: { slab: string; market: PublicKey; shares: bigint }[] = [];
   await Promise.all(
     rows.map(async (r, i) => {
       const [ataInfo, redInfo, regInfo] = [infos[3 * i], infos[3 * i + 1], infos[3 * i + 2]];
@@ -62,6 +67,11 @@ export async function readEarnPositions(
         out.set(r.slab, { shares, valueAtoms: 0n });
         return;
       }
+      const boundFlag = decodeLpVaultRegistryBound(new Uint8Array(regInfo.data));
+      if (boundFlag === true) {
+        boundHeld.push({ slab: r.slab, market: r.market, shares }); // priced below, in one batch
+        return;
+      }
       const reg = parseLpVaultRegistry(new Uint8Array(regInfo.data));
       const total = BigInt(reg.totalLpSharesOutstanding);
       let valueAtoms = valueShares(shares, total + BigInt(reg.feeDistributionTotalAtoms), total);
@@ -69,9 +79,18 @@ export async function readEarnPositions(
       const v = sp ? vaultValue(sp) : null;
       if (sp && v) valueAtoms = valueShares(shares, v.nav, sp.totalShares);
       // Two-pot vault whose pots couldn't be read or priced: unknown, not shares + fees.
-      else if (decodeLpVaultRegistryBound(new Uint8Array(regInfo.data)) === false) valueAtoms = null;
+      else if (boundFlag === false) valueAtoms = null;
       out.set(r.slab, { shares, valueAtoms });
     }),
   );
+  // Bound vaults: the same price as the withdraw preview, floor(shares * senior / S); unpriceable => unknown.
+  if (boundHeld.length > 0) {
+    const priced = await readBoundVaultPricings(connection, programId, boundHeld.map((b) => b.market));
+    for (const b of boundHeld) {
+      const p = priced.get(b.slab) ?? null;
+      const valueAtoms = p && p.withdrawSeniorValue !== null && p.totalShares > 0n ? previewWithdrawAtoms(b.shares, p.totalShares, p.withdrawSeniorValue) : null;
+      out.set(b.slab, { shares: b.shares, valueAtoms });
+    }
+  }
   return out;
 }
